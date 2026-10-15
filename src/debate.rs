@@ -163,20 +163,85 @@ pub enum Cmd {
     Ask(String),
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
 struct Entry {
     quem: String,
     titulo: String,
     texto: String,
+    /// Avaliação do juiz em formato estruturado, para reconstruir a tela ao reabrir.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avaliacao: Option<Check>,
 }
 
-#[derive(Serialize, Default)]
-struct Record {
-    tema: String,
+/// O `.json` salvo: o bastante para reler o debate ou retomá-lo de onde parou.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Record {
+    pub tema: String,
+    pub idioma: String,
     enquadramento: Option<Framing>,
     dossies: [Option<Dossie>; 2],
     transcricao: Vec<Entry>,
-    veredito: Option<Verdict>,
+    pub veredito: Option<Verdict>,
+    sessoes: [Option<String>; 3],
+    /// O que cada agente ainda não recebeu (vai no início do próximo prompt dele).
+    pendentes: [Vec<String>; 3],
+    /// Último passo concluído: (eixo, rodada, vez); vez 0/1 = debatedores, 2 = avaliação do juiz.
+    feito: Option<(usize, usize, usize)>,
+}
+
+impl Record {
+    pub fn resumable(&self) -> bool {
+        self.veredito.is_none() && self.sessoes[Side::Judge as usize].is_some()
+    }
+}
+
+/// Debates salvos (caminho sem extensão + registro), do mais novo ao mais antigo.
+pub fn list() -> Vec<(PathBuf, Record)> {
+    let mut v: Vec<(PathBuf, Record)> = std::fs::read_dir(data_dir().join("debates"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| Some((p.with_extension(""), serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?)))
+        .collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v
+}
+
+/// Mensagens que reconstroem na UI tudo o que já aconteceu no debate.
+pub fn replay(path: &std::path::Path, rec: &Record) -> Vec<Msg> {
+    let mut v = vec![Msg::Saved(path.with_extension("md"))];
+    if let Some(f) = &rec.enquadramento {
+        v.push(Msg::Framing(f.clone()));
+    }
+    for (side, d) in [Side::Pro, Side::Con].into_iter().zip(&rec.dossies) {
+        if let Some(d) = d {
+            v.push(Msg::Dossie(side, d.clone()));
+        }
+    }
+    // a primeira entrada é o enquadramento, já mostrado acima
+    for e in rec.transcricao.iter().skip(rec.enquadramento.is_some() as usize) {
+        match ([Side::Pro, Side::Con].into_iter().find(|s| s.name() == e.quem), &e.avaliacao) {
+            (Some(s), _) => {
+                v.push(Msg::Start(s, e.titulo.clone()));
+                v.push(Msg::Said(s, e.texto.clone()));
+            }
+            (None, Some(c)) => v.push(Msg::Check(c.clone())),
+            (None, None) => v.push(Msg::Judge(e.texto.clone())),
+        }
+    }
+    // ao retomar, o próprio fluxo anuncia o eixo atual
+    let n = rec.enquadramento.as_ref().map_or(0, |f| f.eixos.len());
+    if let (Some(f), false, true) = (rec.feito, rec.resumable(), n > 0) {
+        v.push(Msg::Eixo(f.0.min(n - 1)));
+    }
+    if let Some(verdict) = &rec.veredito {
+        v.push(Msg::Verdict(verdict.clone()));
+    }
+    v
 }
 
 pub fn data_dir() -> PathBuf {
@@ -190,7 +255,6 @@ fn slug(s: &str) -> String {
 
 struct Debate {
     agents: [Agent; 3],
-    inbox: [Vec<String>; 3],
     tx: UnboundedSender<Msg>,
     rx: UnboundedReceiver<Cmd>,
     manual: bool,
@@ -202,21 +266,25 @@ struct Debate {
 pub async fn run(topic: String, tx: UnboundedSender<Msg>, rx: UnboundedReceiver<Cmd>) {
     let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let path = data_dir().join("debates").join(format!("{unix}-{}", slug(&topic)));
-    let mut d = Debate {
-        agents: [
-            Agent::new(DEBATER_MODEL, debater_system(Side::Pro, &topic)),
-            Agent::new(DEBATER_MODEL, debater_system(Side::Con, &topic)),
-            Agent::new(JUDGE_MODEL, tr!(JUDGE_SYSTEM, JUDGE_SYSTEM_EN).into()),
-        ],
-        inbox: Default::default(),
-        tx,
-        rx,
-        manual: false,
-        step: false,
-        rec: Record { tema: topic, ..Default::default() },
-        path,
-    };
-    let _ = d.tx.send(Msg::Saved(d.path.with_extension("md")));
+    let rec = Record { tema: topic, idioma: tr!("pt", "en").into(), ..Default::default() };
+    resume(path, rec, tx, rx).await
+}
+
+/// Continua um debate salvo (ou começa um novo, com `rec` vazio) a partir do último passo concluído.
+// ponytail: depende das sessões do claude, que ele apaga após cleanupPeriodDays (30 dias por padrão); debates mais velhos falham ao retomar.
+pub async fn resume(path: PathBuf, rec: Record, tx: UnboundedSender<Msg>, rx: UnboundedReceiver<Cmd>) {
+    for m in replay(&path, &rec) {
+        let _ = tx.send(m);
+    }
+    let mut agents = [
+        Agent::new(DEBATER_MODEL, debater_system(Side::Pro, &rec.tema)),
+        Agent::new(DEBATER_MODEL, debater_system(Side::Con, &rec.tema)),
+        Agent::new(JUDGE_MODEL, tr!(JUDGE_SYSTEM, JUDGE_SYSTEM_EN).into()),
+    ];
+    for (a, s) in agents.iter_mut().zip(&rec.sessoes) {
+        a.session = s.clone();
+    }
+    let mut d = Debate { agents, tx, rx, manual: false, step: false, rec, path };
     if let Err(e) = d.flow().await {
         let _ = d.tx.send(Msg::Error(e));
     }
@@ -264,7 +332,7 @@ impl Debate {
     }
 
     fn log(&mut self, quem: &str, titulo: &str, texto: &str) {
-        self.rec.transcricao.push(Entry { quem: quem.into(), titulo: titulo.into(), texto: texto.into() });
+        self.rec.transcricao.push(Entry { quem: quem.into(), titulo: titulo.into(), texto: texto.into(), avaliacao: None });
         self.save();
     }
 
@@ -274,7 +342,7 @@ impl Debate {
 
     /// Prompt de um agente = tudo que aconteceu desde o último turno dele + a instrução atual.
     fn prompt(&mut self, side: Side, instr: &str) -> String {
-        let mut p = std::mem::take(&mut self.inbox[side as usize]).join("\n\n");
+        let mut p = std::mem::take(&mut self.rec.pendentes[side as usize]).join("\n\n");
         if !p.is_empty() {
             p += "\n\n---\n";
         }
@@ -295,8 +363,8 @@ impl Debate {
         let text = self.ask(side, &p, None).await?.text;
         self.send(Msg::Said(side, text.clone()));
         let news = format!("{} ({title}):\n{text}", side.name());
-        self.inbox[side.other() as usize].push(news.clone());
-        self.inbox[Side::Judge as usize].push(news);
+        self.rec.pendentes[side.other() as usize].push(news.clone());
+        self.rec.pendentes[Side::Judge as usize].push(news);
         self.log(side.name(), title, &text);
         Ok(())
     }
@@ -353,50 +421,40 @@ only one short sentence handing over the floor."
 
     async fn flow(&mut self) -> Result<(), String> {
         let topic = self.rec.tema.clone();
-        self.send(Msg::Phase(tr!("O juiz está enquadrando o tema", "The judge is framing the topic").into()));
-        let f: Framing = self.ask_json(Side::Judge, &trf!("Tema do debate: «{topic}». Enquadre o debate de forma concisa.", "Debate motion: «{topic}». Frame the debate concisely."), FRAMING_SCHEMA).await?;
-        self.send(Msg::Framing(f.clone()));
-        self.log(Side::Judge.name(), tr!("Enquadramento", "Framing"), &framing_text(&f));
-        self.rec.enquadramento = Some(f.clone());
-        self.checkpoint().await?;
-
-        self.send(Msg::Phase(tr!("Pesquisa", "Research").into()));
-        let research = |id: char| {
-            trf!(
-                "Enquadramento do juiz:\n{}\n\nFASE DE PESQUISA: use WebSearch e WebFetch para montar seu dossiê. Busque fontes confiáveis \
-(dados oficiais, estudos, imprensa de qualidade) e antecipe o que o outro lado vai usar. Faça no máximo ~8 buscas. Retorne de 5 a 10 \
-fontes com id {id}1, {id}2..., a URL real que você consultou, o título e um trecho ou dado concreto; e seus principais argumentos.",
-                "Judge's framing:\n{}\n\nRESEARCH PHASE: use WebSearch and WebFetch to build your dossier. Look for reliable sources \
-(official data, studies, quality press) and anticipate what the other side will use. Do at most ~8 searches. Return 5 to 10 \
-sources with ids {id}1, {id}2..., the real URL you consulted, the title and a concrete excerpt or data point; and your main arguments.",
-                framing_text(&f)
-            )
+        let f = match self.rec.enquadramento.clone() {
+            Some(f) => f,
+            None => {
+                self.send(Msg::Phase(tr!("O juiz está enquadrando o tema", "The judge is framing the topic").into()));
+                let f: Framing = self.ask_json(Side::Judge, &trf!("Tema do debate: «{topic}». Enquadre o debate de forma concisa.", "Debate motion: «{topic}». Frame the debate concisely."), FRAMING_SCHEMA).await?;
+                self.send(Msg::Framing(f.clone()));
+                self.rec.enquadramento = Some(f.clone());
+                self.log(Side::Judge.name(), tr!("Enquadramento", "Framing"), &framing_text(&f));
+                self.checkpoint().await?;
+                f
+            }
         };
-        let (pp, pc) = (research('P'), research('C'));
-        self.send(Msg::Busy(Side::Pro));
-        self.send(Msg::Busy(Side::Con));
-        let [pro, con, _] = &mut self.agents;
-        let (rp, rc) = tokio::join!(
-            ask_with(pro, Side::Pro, &self.tx, &pp, Some(DOSSIE_SCHEMA)),
-            ask_with(con, Side::Con, &self.tx, &pc, Some(DOSSIE_SCHEMA))
-        );
-        for (side, r) in [(Side::Pro, rp), (Side::Con, rc)] {
-            let d: Dossie = json(side, r?)?;
-            let fontes: Vec<String> = d.fontes.iter().map(|s| format!("[{}] {} — {} — «{}»", s.id, s.titulo, s.url, s.trecho)).collect();
-            self.inbox[Side::Judge as usize].push(trf!("DOSSIÊ DO {} (para verificação)\nTese: {}\n{}", "{} DOSSIER (for verification)\nThesis: {}\n{}", side.name(), d.tese, fontes.join("\n")));
-            self.send(Msg::Dossie(side, d.clone()));
-            self.rec.dossies[side as usize] = Some(d);
-        }
-        self.save();
-        self.checkpoint().await?;
 
+        let need = self.rec.dossies.each_ref().map(Option::is_none);
+        if need[0] || need[1] {
+            self.research(&f, need).await?;
+        }
+
+        // ao retomar, pula os passos já feitos
+        let feito = self.rec.feito;
+        let todo = |p: (usize, usize, usize)| feito.is_none_or(|d| p > d);
         let n = f.eixos.len();
         for (i, eixo) in f.eixos.iter().enumerate() {
+            if !todo((i, MAX_ROUNDS, 2)) {
+                continue;
+            }
             self.send(Msg::Eixo(i));
             self.send(Msg::Phase(trf!("Eixo {}/{n}", "Issue {}/{n}", i + 1)));
             let first = if i % 2 == 0 { Side::Pro } else { Side::Con };
             for round in 1..=MAX_ROUNDS {
-                for side in [first, first.other()] {
+                for (k, side) in [first, first.other()].into_iter().enumerate() {
+                    if !todo((i, round, k)) {
+                        continue;
+                    }
                     let (title, instr) = if round == 1 {
                         let kind = if side == first { tr!("abertura", "opening") } else { tr!("resposta", "response") };
                         (trf!("eixo {}: {kind}", "issue {}: {kind}", i + 1), trf!("EIXO {}/{n}: «{}» — {}\nFaça sua fala de {kind} neste eixo.", "ISSUE {}/{n}: «{}» — {}\nGive your {kind} speech on this issue.", i + 1, eixo.titulo, eixo.pergunta))
@@ -404,7 +462,11 @@ sources with ids {id}1, {id}2..., the real URL you consulted, the title and a co
                         (trf!("eixo {}: réplica {round}", "issue {}: rebuttal {round}", i + 1), trf!("Sua réplica (rodada {round}) no eixo «{}».", "Your rebuttal (round {round}) on the issue «{}».", eixo.titulo))
                     };
                     self.speak(side, &title, &instr).await?;
+                    self.mark((i, round, k));
                     self.checkpoint().await?;
+                }
+                if !todo((i, round, 2)) {
+                    continue;
                 }
                 let last = round == MAX_ROUNDS;
                 let instr = trf!(
@@ -416,19 +478,22 @@ sources with ids {id}1, {id}2..., the real URL you consulted, the title and a co
                 let c: Check = self.ask_json(Side::Judge, &instr, CHECK_SCHEMA).await?;
                 for inf in &c.infracoes {
                     let side = if inf.lado == "pro" { Side::Pro } else { Side::Con };
-                    self.inbox[side as usize].push(trf!("O JUIZ apontou uma infração sua: {} — {} («{}»)", "The JUDGE flagged an infraction of yours: {} — {} («{}»)", inf.tipo, inf.explicacao, inf.trecho));
+                    self.rec.pendentes[side as usize].push(trf!("O JUIZ apontou uma infração sua: {} — {} («{}»)", "The JUDGE flagged an infraction of yours: {} — {} («{}»)", inf.tipo, inf.explicacao, inf.trecho));
                 }
                 for v in c.fontes_verificadas.iter().filter(|v| !v.ok) {
                     let side = if v.id.starts_with('P') { Side::Pro } else { Side::Con };
-                    self.inbox[side as usize].push(trf!("O JUIZ verificou sua fonte [{}] e ela NÃO confere: {}", "The JUDGE checked your source [{}] and it does NOT hold up: {}", v.id, v.nota));
+                    self.rec.pendentes[side as usize].push(trf!("O JUIZ verificou sua fonte [{}] e ela NÃO confere: {}", "The JUDGE checked your source [{}] and it does NOT hold up: {}", v.id, v.nota));
                 }
                 if let Some(t) = &c.intervencao {
                     for side in [Side::Pro, Side::Con] {
-                        self.inbox[side as usize].push(trf!("O JUIZ disse: {t}", "The JUDGE said: {t}"));
+                        self.rec.pendentes[side as usize].push(trf!("O JUIZ disse: {t}", "The JUDGE said: {t}"));
                     }
                 }
-                self.log(Side::Judge.name(), &trf!("eixo {}: avaliação da rodada {round}", "issue {}: round {round} assessment", i + 1), &check_text(&c));
                 let close = c.encerrar_eixo;
+                let titulo = trf!("eixo {}: avaliação da rodada {round}", "issue {}: round {round} assessment", i + 1);
+                self.rec.transcricao.push(Entry { quem: Side::Judge.name().into(), titulo, texto: check_text(&c), avaliacao: Some(c.clone()) });
+                // eixo encerrado conta como todas as rodadas feitas
+                self.mark((i, if close { MAX_ROUNDS } else { round }, 2));
                 self.send(Msg::Check(c));
                 self.checkpoint().await?;
                 if close {
@@ -438,8 +503,12 @@ sources with ids {id}1, {id}2..., the real URL you consulted, the title and a co
         }
 
         self.send(Msg::Phase(tr!("Considerações finais", "Closing statements").into()));
-        for side in [Side::Pro, Side::Con] {
+        for (k, side) in [Side::Pro, Side::Con].into_iter().enumerate() {
+            if !todo((n, 0, k)) {
+                continue;
+            }
             self.speak(side, tr!("considerações finais", "closing statement"), tr!("CONSIDERAÇÕES FINAIS: resuma por que sua posição saiu mais forte, em até ~150 palavras.", "CLOSING STATEMENT: sum up why your position came out stronger, in up to ~150 words.")).await?;
+            self.mark((n, 0, k));
             self.checkpoint().await?;
         }
 
@@ -452,7 +521,58 @@ sources with ids {id}1, {id}2..., the real URL you consulted, the title and a co
         Ok(())
     }
 
-    fn save(&self) {
+    /// Fase de pesquisa, só para os lados que ainda não têm dossiê.
+    async fn research(&mut self, f: &Framing, need: [bool; 2]) -> Result<(), String> {
+        self.send(Msg::Phase(tr!("Pesquisa", "Research").into()));
+        let research = |id: char| {
+            trf!(
+                "Enquadramento do juiz:\n{}\n\nFASE DE PESQUISA: use WebSearch e WebFetch para montar seu dossiê. Busque fontes confiáveis \
+(dados oficiais, estudos, imprensa de qualidade) e antecipe o que o outro lado vai usar. Faça no máximo ~8 buscas. Retorne de 5 a 10 \
+fontes com id {id}1, {id}2..., a URL real que você consultou, o título e um trecho ou dado concreto; e seus principais argumentos.",
+                "Judge's framing:\n{}\n\nRESEARCH PHASE: use WebSearch and WebFetch to build your dossier. Look for reliable sources \
+(official data, studies, quality press) and anticipate what the other side will use. Do at most ~8 searches. Return 5 to 10 \
+sources with ids {id}1, {id}2..., the real URL you consulted, the title and a concrete excerpt or data point; and your main arguments.",
+                framing_text(f)
+            )
+        };
+        let (pp, pc) = (research('P'), research('C'));
+        for side in [Side::Pro, Side::Con].into_iter().filter(|s| need[*s as usize]) {
+            self.send(Msg::Busy(side));
+        }
+        let [pro, con, _] = &mut self.agents;
+        let tx = &self.tx;
+        let (rp, rc) = tokio::join!(
+            async { if need[0] { Some(ask_with(pro, Side::Pro, tx, &pp, Some(DOSSIE_SCHEMA)).await) } else { None } },
+            async { if need[1] { Some(ask_with(con, Side::Con, tx, &pc, Some(DOSSIE_SCHEMA)).await) } else { None } }
+        );
+        // guarda o dossiê de um lado mesmo se o outro falhar: pesquisa é cara
+        let mut err = None;
+        for (side, r) in [(Side::Pro, rp), (Side::Con, rc)] {
+            let Some(r) = r else { continue };
+            match r.and_then(|r| json::<Dossie>(side, r)) {
+                Ok(d) => {
+                    let fontes: Vec<String> = d.fontes.iter().map(|s| format!("[{}] {} — {} — «{}»", s.id, s.titulo, s.url, s.trecho)).collect();
+                    self.rec.pendentes[Side::Judge as usize].push(trf!("DOSSIÊ DO {} (para verificação)\nTese: {}\n{}", "{} DOSSIER (for verification)\nThesis: {}\n{}", side.name(), d.tese, fontes.join("\n")));
+                    self.send(Msg::Dossie(side, d.clone()));
+                    self.rec.dossies[side as usize] = Some(d);
+                }
+                Err(e) => err = err.or(Some(e)),
+            }
+        }
+        self.save();
+        if let Some(e) = err {
+            return Err(e);
+        }
+        self.checkpoint().await
+    }
+
+    fn mark(&mut self, p: (usize, usize, usize)) {
+        self.rec.feito = Some(p);
+        self.save();
+    }
+
+    fn save(&mut self) {
+        self.rec.sessoes = self.agents.each_ref().map(|a| a.session.clone());
         let res = std::fs::create_dir_all(self.path.parent().unwrap())
             .and_then(|_| std::fs::write(self.path.with_extension("json"), serde_json::to_string_pretty(&self.rec).unwrap()))
             .and_then(|_| std::fs::write(self.path.with_extension("md"), markdown(&self.rec)));
@@ -491,4 +611,18 @@ fn markdown(r: &Record) -> String {
         s += &trf!("\n**Infrações:** {}\n", "\n**Infractions:** {}\n", v.infracoes_resumo);
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Record;
+
+    #[test]
+    fn old_records_load_read_only() {
+        let old: Record = serde_json::from_str(r#"{"tema":"x","enquadramento":null,"dossies":[null,null],"transcricao":[{"quem":"PRÓ","titulo":"t","texto":"y"}],"veredito":null}"#).unwrap();
+        assert!(!old.resumable());
+        let new: Record = serde_json::from_str(r#"{"tema":"x","sessoes":[null,null,"s"],"feito":[1,2,0]}"#).unwrap();
+        assert!(new.resumable());
+        assert_eq!(new.feito, Some((1, 2, 0)));
+    }
 }

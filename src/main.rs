@@ -24,7 +24,7 @@ mod debate;
 mod sprites;
 mod ui;
 
-use debate::{Cmd, Dossie, Eixo, Msg, Side, Verdict};
+use debate::{Cmd, Dossie, Eixo, Msg, Record, Side, Verdict};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use sprites::Pose;
 use std::cell::Cell;
@@ -72,12 +72,21 @@ pub struct App {
     pub popup_max: Cell<u16>,
     pub saved: Option<PathBuf>,
     pub error: bool,
+    /// Tela inicial: debates salvos e o selecionado (None = campo de tema).
+    pub saved_list: Vec<(PathBuf, Record)>,
+    pub sel: Option<usize>,
+    open: Option<(PathBuf, Record)>,
+    pub readonly: bool,
 }
 
 impl App {
     fn new(topic: String) -> Self {
         App {
             mode: if topic.is_empty() { Mode::Topic } else { Mode::Normal },
+            saved_list: if topic.is_empty() { debate::list() } else { vec![] },
+            sel: None,
+            open: None,
+            readonly: false,
             input: String::new(),
             topic,
             tick: 0,
@@ -243,7 +252,21 @@ impl App {
         };
         match self.mode {
             Mode::Topic | Mode::Ask => match code {
-                KeyCode::Char(c) => self.input.push(c),
+                KeyCode::Down if self.mode == Mode::Topic && !self.saved_list.is_empty() => {
+                    self.sel = Some(self.sel.map_or(0, |i| (i + 1).min(self.saved_list.len() - 1)));
+                }
+                KeyCode::Up => self.sel = self.sel.and_then(|i| i.checked_sub(1)),
+                KeyCode::Esc if self.sel.is_some() => self.sel = None,
+                KeyCode::Enter if self.sel.is_some() => {
+                    let (path, rec) = std::mem::take(&mut self.saved_list).swap_remove(self.sel.unwrap());
+                    self.topic = rec.tema.clone();
+                    self.open = Some((path, rec));
+                    self.mode = Mode::Normal;
+                }
+                KeyCode::Char(c) => {
+                    self.sel = None;
+                    self.input.push(c);
+                }
                 KeyCode::Backspace => {
                     self.input.pop();
                 }
@@ -276,7 +299,7 @@ impl App {
             },
             Mode::Normal => match code {
                 KeyCode::Char('q') => return false,
-                KeyCode::Char(' ') => {
+                KeyCode::Char(' ') if !self.readonly => {
                     self.manual = !self.manual;
                     self.waiting = false;
                     send(Cmd::Manual(self.manual));
@@ -285,7 +308,7 @@ impl App {
                     self.waiting = false;
                     send(Cmd::Next);
                 }
-                KeyCode::Char('p') => self.mode = Mode::Ask,
+                KeyCode::Char('p') if !self.readonly => self.mode = Mode::Ask,
                 KeyCode::Char('f') => (self.mode, self.popup_scroll) = (Mode::Sources, 0),
                 KeyCode::Char('v') if self.verdict.is_some() => (self.mode, self.popup_scroll) = (Mode::Verdict, 0),
                 KeyCode::Tab | KeyCode::Left | KeyCode::Right => self.focus = 1 - self.focus,
@@ -365,13 +388,32 @@ async fn main() -> std::io::Result<()> {
     });
     let (msg_tx, mut msg_rx) = unbounded_channel();
     let mut cmd_tx: Option<UnboundedSender<Cmd>> = None;
+    let mut started = false;
     let mut tick = tokio::time::interval(Duration::from_millis(150));
 
     let mut terminal = ratatui::init();
     loop {
-        if cmd_tx.is_none() && !app.topic.is_empty() {
+        if !started && !app.topic.is_empty() {
+            started = true;
             let (tx, rx) = unbounded_channel();
-            tokio::spawn(debate::run(app.topic.clone(), msg_tx.clone(), rx));
+            match app.open.take() {
+                None => {
+                    tokio::spawn(debate::run(app.topic.clone(), msg_tx.clone(), rx));
+                }
+                Some((path, rec)) => {
+                    // o debate segue no idioma em que começou
+                    EN.store(rec.idioma == "en", std::sync::atomic::Ordering::Relaxed);
+                    if rec.resumable() {
+                        tokio::spawn(debate::resume(path, rec, msg_tx.clone(), rx));
+                    } else {
+                        for m in debate::replay(&path, &rec) {
+                            app.on_msg(m);
+                        }
+                        app.readonly = true;
+                        app.phase = tr!("Somente leitura", "Read-only").into();
+                    }
+                }
+            }
             cmd_tx = Some(tx);
         }
         terminal.draw(|f| ui::draw(f, &app))?;
