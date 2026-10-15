@@ -203,8 +203,14 @@ impl App {
                 for v in c.fontes_verificadas.iter().filter(|v| !v.ok) {
                     text += &format!("\n✗ [{}] {}", v.id, v.nota);
                 }
-                let text = text.trim().to_string();
-                self.balloon = if text.is_empty() { tr!("✓ Rodada limpa. Prossigam.", "✓ Clean round. Carry on.").into() } else { text };
+                let mut text = text.trim().to_string();
+                if text.is_empty() {
+                    text = tr!("✓ Rodada limpa.", "✓ Clean round.").into();
+                }
+                if let Some(s) = c.status() {
+                    text += &format!("\n\n{s}");
+                }
+                self.balloon = text;
                 self.say_judge();
                 if objection {
                     self.objection_until = self.tick + 20;
