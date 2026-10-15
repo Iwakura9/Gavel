@@ -16,5 +16,6 @@ Keys: `space` toggles automatic / step by step (in step by step, `Enter` release
 `tab` switches panel · `↑↓ PgUp PgDn End` scroll · `q` quits.
 
 Debates are saved to `~/.local/share/gavel/debates/` (`.json` and `.md`) after every turn.
+Run with no topic and press `↓` on the home screen to list them: `Enter` reopens one (finished debates are read-only, interrupted ones continue where they stopped), `Del` twice deletes it.
 
 Test without spending usage: `GAVEL_CLAUDE_BIN=$PWD/tests/fake-claude.sh cargo run -- "topic"`.

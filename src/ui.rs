@@ -184,7 +184,11 @@ fn status_bar(f: &mut Frame, app: &App, area: Rect) {
     if let Some(u) = app.usage {
         s.push(trf!("· uso 5h {:.0}% ", "· 5h usage {:.0}% ", u * 100.0).fg(DIM));
     }
-    s.push(trf!("· ␣ {}  p pergunta  f fontes  v veredito  q sai", "· ␣ {}  p question  f sources  v verdict  q quit", if app.manual { tr!("automático", "automatic") } else { tr!("passo a passo", "step by step") }).fg(DIM));
+    if app.readonly {
+        s.push(tr!("· 📖 f fontes  v veredito  q sai", "· 📖 f sources  v verdict  q quit").fg(DIM));
+    } else {
+        s.push(trf!("· ␣ {}  p pergunta  f fontes  v veredito  q sai", "· ␣ {}  p question  f sources  v verdict  q quit", if app.manual { tr!("automático", "automatic") } else { tr!("passo a passo", "step by step") }).fg(DIM));
+    }
     f.render_widget(Line::from(s), area);
 }
 
@@ -351,16 +355,45 @@ fn verdict_popup(f: &mut Frame, app: &App) {
 
 fn topic_screen(f: &mut Frame, app: &App) {
     let a = f.area();
-    let area = center(a, 66, 15);
+    // a lista só aparece ao descer com ↓ a partir do campo de tema
+    let shown = if app.sel.is_some() { app.saved_list.len().min(8) as u16 } else { 0 };
+    let list_h = if shown > 0 { shown + 2 } else { 0 };
+    let area = center(a, 66, 15 + list_h);
     let inner = popup(f, area, Line::from(" ⚖ GAVEL ".bold().fg(Color::Black).bg(GOLD)).centered(), GOLD);
-    let [_, sprites_row, _, label, input, _, hint] = Layout::vertical([Length(1), Length(ROWS), Length(1), Length(1), Length(1), Fill(1), Length(1)]).areas(inner);
+    let [_, sprites_row, _, label, input, _, list, hint] =
+        Layout::vertical([Length(1), Length(ROWS), Length(1), Length(1), Length(1), Fill(1), Length(list_h), Length(1)]).areas(inner);
     let cols: [Rect; 3] = Layout::horizontal([Length(SW); 3]).flex(ratatui::layout::Flex::SpaceAround).areas(sprites_row);
     for (side, col) in [Side::Pro, Side::Judge, Side::Con].into_iter().zip(cols) {
         sprite(f, col, side, if side == Side::Judge { Pose::Idle } else { Pose::Thinking }, app.tick);
     }
     f.render_widget(Line::from(tr!("Qual o tema do debate?", "What is the debate topic?").bold()).centered(), label);
     f.render_widget(Line::from(vec!["› ".fg(GOLD), app.input.clone().into(), "▏".fg(GOLD)]), input);
-    f.render_widget(Line::from(tr!("Enter começa · Esc sai", "Enter starts · Esc quits").fg(DIM)).centered(), hint);
+    let hint_line = if app.confirm_del {
+        tr!("Del de novo apaga · outra tecla cancela", "Del again deletes · any other key cancels").bold().fg(RED)
+    } else if shown > 0 {
+        tr!("Enter abre · Del apaga · Esc volta", "Enter opens · Del deletes · Esc goes back").fg(DIM)
+    } else if !app.saved_list.is_empty() {
+        tr!("Enter começa · ↓ debates salvos · Esc sai", "Enter starts · ↓ saved debates · Esc quits").fg(DIM)
+    } else {
+        tr!("Enter começa · Esc sai", "Enter starts · Esc quits").fg(DIM)
+    };
+    f.render_widget(Line::from(hint_line).centered(), hint);
+    if shown == 0 {
+        return;
+    }
+
+    // debates salvos: ✓ terminado (só leitura) · ↻ continua de onde parou · · antigo, só leitura
+    let start = app.sel.map_or(0, |s| (s + 1).saturating_sub(shown as usize));
+    let mut lines = vec![Line::from(tr!("Debates salvos", "Saved debates").bold().fg(GOLD))];
+    for (k, (_, rec)) in app.saved_list.iter().enumerate().skip(start).take(shown as usize) {
+        let (mark, c) = if rec.veredito.is_some() { ("✓", GREEN) } else if rec.resumable() { ("↻", GOLD) } else { ("·", DIM) };
+        lines.push(if app.sel == Some(k) {
+            Line::from(format!(" {mark} {} ", rec.tema).bold().fg(Color::Black).bg(if app.confirm_del { RED } else { GOLD }))
+        } else {
+            Line::from(vec![format!(" {mark} ").fg(c), rec.tema.clone().into()])
+        });
+    }
+    f.render_widget(Paragraph::new(lines), list.inner(Margin::new(1, 0)));
 }
 
 #[cfg(test)]
