@@ -193,7 +193,47 @@ pub struct Record {
 
 impl Record {
     pub fn resumable(&self) -> bool {
-        self.veredito.is_none() && self.sessoes[Side::Judge as usize].is_some()
+        self.veredito.is_none()
+    }
+
+    /// Registros antigos não guardam `feito`: deduz o último passo concluído pela transcrição.
+    fn infer_feito(&self) -> Option<(usize, usize, usize)> {
+        let n = self.enquadramento.as_ref()?.eixos.len();
+        self.transcricao.iter().rev().find_map(|e| {
+            let side = [Side::Pro, Side::Con].into_iter().find(|s| s.name() == e.quem);
+            if e.titulo == tr!("considerações finais", "closing statement") {
+                return Some((n, 0, side? as usize));
+            }
+            // "eixo 2: réplica 3", "eixo 2: avaliação da rodada 1"; perguntas da plateia e o enquadramento não contam
+            let rest = e.titulo.strip_prefix(tr!("eixo ", "issue "))?;
+            let nums: Vec<usize> = rest.split(|c: char| !c.is_ascii_digit()).filter_map(|x| x.parse().ok()).collect();
+            let (i, round) = (nums.first()?.checked_sub(1)?, nums.get(1).copied().unwrap_or(1));
+            Some(match side {
+                Some(s) => (i, round, (s != if i % 2 == 0 { Side::Pro } else { Side::Con }) as usize),
+                None if e.avaliacao.as_ref().is_some_and(|c| c.encerrar_eixo) => (i, MAX_ROUNDS, 2),
+                None => (i, round, 2),
+            })
+        })
+    }
+
+    /// Para um agente sem sessão salva: o histórico do debate, que ele não lembra.
+    fn recap(&self, side: Side) -> String {
+        let mut s = tr!(
+            "RETOMADA: este debate foi interrompido e continua agora, mas você não tem memória do que já aconteceu. Eis o histórico:",
+            "RESUMING: this debate was interrupted and continues now, but you have no memory of what already happened. Here is the record:"
+        )
+        .to_string();
+        for (d_side, d) in [Side::Pro, Side::Con].into_iter().zip(&self.dossies) {
+            if let Some(d) = d
+                && (side == Side::Judge || side == d_side)
+            {
+                s += &format!("\n\n{}", dossie_text(d_side, d));
+            }
+        }
+        for e in &self.transcricao {
+            s += &format!("\n\n{} ({}):\n{}", e.quem, e.titulo, e.texto);
+        }
+        s
     }
 }
 
@@ -272,7 +312,18 @@ pub async fn run(topic: String, tx: UnboundedSender<Msg>, rx: UnboundedReceiver<
 
 /// Continua um debate salvo (ou começa um novo, com `rec` vazio) a partir do último passo concluído.
 // ponytail: depende das sessões do claude, que ele apaga após cleanupPeriodDays (30 dias por padrão); debates mais velhos falham ao retomar.
-pub async fn resume(path: PathBuf, rec: Record, tx: UnboundedSender<Msg>, rx: UnboundedReceiver<Cmd>) {
+pub async fn resume(path: PathBuf, mut rec: Record, tx: UnboundedSender<Msg>, rx: UnboundedReceiver<Cmd>) {
+    if rec.feito.is_none() {
+        rec.feito = rec.infer_feito();
+    }
+    // sem sessão salva o agente começa do zero; o histórico já cobre o que estava pendente
+    if !rec.transcricao.is_empty() {
+        for side in [Side::Pro, Side::Con, Side::Judge] {
+            if rec.sessoes[side as usize].is_none() {
+                rec.pendentes[side as usize] = vec![rec.recap(side)];
+            }
+        }
+    }
     for m in replay(&path, &rec) {
         let _ = tx.send(m);
     }
@@ -313,6 +364,11 @@ fn json<T: for<'a> Deserialize<'a>>(side: Side, r: crate::agent::Reply) -> Resul
 fn framing_text(f: &Framing) -> String {
     let eixos: Vec<String> = f.eixos.iter().enumerate().map(|(i, e)| format!("{}. {} — {}", i + 1, e.titulo, e.pergunta)).collect();
     trf!("Definições: {}\nÔnus da prova: {}\nEixos:\n{}\nRegras: {}", "Definitions: {}\nBurden of proof: {}\nIssues:\n{}\nRules: {}", f.definicoes, f.onus_da_prova, eixos.join("\n"), f.regras)
+}
+
+fn dossie_text(side: Side, d: &Dossie) -> String {
+    let fontes: Vec<String> = d.fontes.iter().map(|s| format!("[{}] {} — {} — «{}»", s.id, s.titulo, s.url, s.trecho)).collect();
+    trf!("DOSSIÊ DO {}\nTese: {}\n{}", "{} DOSSIER\nThesis: {}\n{}", side.name(), d.tese, fontes.join("\n"))
 }
 
 fn check_text(c: &Check) -> String {
@@ -551,8 +607,7 @@ sources with ids {id}1, {id}2..., the real URL you consulted, the title and a co
             let Some(r) = r else { continue };
             match r.and_then(|r| json::<Dossie>(side, r)) {
                 Ok(d) => {
-                    let fontes: Vec<String> = d.fontes.iter().map(|s| format!("[{}] {} — {} — «{}»", s.id, s.titulo, s.url, s.trecho)).collect();
-                    self.rec.pendentes[Side::Judge as usize].push(trf!("DOSSIÊ DO {} (para verificação)\nTese: {}\n{}", "{} DOSSIER (for verification)\nThesis: {}\n{}", side.name(), d.tese, fontes.join("\n")));
+                    self.rec.pendentes[Side::Judge as usize].push(dossie_text(side, &d));
                     self.send(Msg::Dossie(side, d.clone()));
                     self.rec.dossies[side as usize] = Some(d);
                 }
@@ -615,12 +670,25 @@ fn markdown(r: &Record) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Record;
+    use super::{Record, Side};
 
     #[test]
-    fn old_records_load_read_only() {
-        let old: Record = serde_json::from_str(r#"{"tema":"x","enquadramento":null,"dossies":[null,null],"transcricao":[{"quem":"PRÓ","titulo":"t","texto":"y"}],"veredito":null}"#).unwrap();
-        assert!(!old.resumable());
+    fn old_records_resume_where_they_stopped() {
+        let entry = |quem: &str, titulo: &str| format!(r#"{{"quem":"{quem}","titulo":"{titulo}","texto":"y"}}"#);
+        let old = |entries: &[String]| -> Record {
+            let json = format!(r#"{{"tema":"x","enquadramento":{{"definicoes":"","onus_da_prova":"","eixos":[{{"titulo":"a","pergunta":"?"}},{{"titulo":"b","pergunta":"?"}}],"regras":""}},"transcricao":[{}]}}"#, entries.join(","));
+            serde_json::from_str(&json).unwrap()
+        };
+        let framing = entry("JUIZ", "Enquadramento");
+        assert_eq!(old(&[framing.clone()]).infer_feito(), None);
+        let r = old(&[framing.clone(), entry("PRÓ", "eixo 1: abertura"), entry("CONTRA", "eixo 1: resposta"), entry("JUIZ", "eixo 1: avaliação da rodada 1"), entry("CONTRA", "eixo 1: réplica 2")]);
+        assert!(r.resumable());
+        assert_eq!(r.infer_feito(), Some((0, 2, 1)));
+        assert!(r.recap(Side::Pro).contains("CONTRA (eixo 1: réplica 2):"));
+        // eixo 2 começa pelo CONTRA; perguntas da plateia não contam
+        let r = old(&[framing.clone(), entry("CONTRA", "eixo 2: abertura"), entry("JUIZ", "pergunta da plateia: 3 rodadas?")]);
+        assert_eq!(r.infer_feito(), Some((1, 1, 0)));
+        assert_eq!(old(&[framing, entry("CONTRA", "considerações finais")]).infer_feito(), Some((2, 0, 1)));
         let new: Record = serde_json::from_str(r#"{"tema":"x","sessoes":[null,null,"s"],"feito":[1,2,0]}"#).unwrap();
         assert!(new.resumable());
         assert_eq!(new.feito, Some((1, 2, 0)));

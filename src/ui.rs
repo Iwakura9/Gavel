@@ -382,11 +382,11 @@ fn topic_screen(f: &mut Frame, app: &App) {
         return;
     }
 
-    // debates salvos: ✓ terminado (só leitura) · ↻ continua de onde parou · · antigo, só leitura
+    // debates salvos: ✓ terminado (só leitura) · ↻ continua de onde parou
     let start = app.sel.map_or(0, |s| (s + 1).saturating_sub(shown as usize));
     let mut lines = vec![Line::from(tr!("Debates salvos", "Saved debates").bold().fg(GOLD))];
     for (k, (_, rec)) in app.saved_list.iter().enumerate().skip(start).take(shown as usize) {
-        let (mark, c) = if rec.veredito.is_some() { ("✓", GREEN) } else if rec.resumable() { ("↻", GOLD) } else { ("·", DIM) };
+        let (mark, c) = if rec.resumable() { ("↻", GOLD) } else { ("✓", GREEN) };
         lines.push(if app.sel == Some(k) {
             Line::from(format!(" {mark} {} ", rec.tema).bold().fg(Color::Black).bg(if app.confirm_del { RED } else { GOLD }))
         } else {
