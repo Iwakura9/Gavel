@@ -5,6 +5,13 @@ and debate citing sources; the **JUDGE** (Opus) frames the debate, flags fallaci
 
 Uses your Claude Code login (subscription): each agent is an isolated `claude -p` with its own session.
 
+## Requirements
+
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) installed and logged in with a Claude subscription (`claude` on your `PATH`).
+- Rust 1.85 or newer.
+
+A debate makes many agent calls (the judge runs on Opus), so it uses a good share of your subscription limits.
+
 ## Install
 
 ```sh
@@ -52,3 +59,7 @@ On the home screen press `↓` to list them: `Enter` reopens one (finished debat
 GAVEL_CLAUDE_BIN=$PWD/tests/fake-claude.sh cargo run -- "topic"   # fake agents, no usage spent
 cargo test                                                         # stream-json parser against real CLI output
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
