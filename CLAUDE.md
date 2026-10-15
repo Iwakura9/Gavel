@@ -18,6 +18,7 @@ The app is bilingual: `--lang pt|en`, Portuguese is the default and the primary 
 - Main branch: `main`.
 - Create a branch for each new feature or change; don't work directly on `main`.
 - Commit after each small working change.
+- After every merge into `main`, install the new version: `cargo install --path . --root ~/.local` (puts `gavel` in `~/.local/bin`, which is on the fish `PATH`).
 
 ## Notes
 - Agents run `claude -p` with the subscription login. Don't use `--bare`: it disables OAuth.

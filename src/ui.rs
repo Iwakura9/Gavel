@@ -10,12 +10,13 @@ use std::collections::HashMap;
 
 const GOLD: Color = Color::Rgb(230, 180, 60);
 const GREEN: Color = Color::Rgb(76, 175, 80);
+const BLUE: Color = Color::Rgb(66, 135, 245);
 const RED: Color = Color::Rgb(229, 57, 53);
 const DIM: Color = Color::Rgb(130, 130, 130);
 const SW: u16 = W as u16;
 
 fn color(i: usize) -> Color {
-    [GREEN, RED, GOLD][i]
+    [BLUE, RED, GOLD][i]
 }
 
 fn center(a: Rect, w: u16, h: u16) -> Rect {
@@ -179,7 +180,7 @@ fn status_bar(f: &mut Frame, app: &App, area: Rect) {
         s.push(format!(" {dots} ").fg(GOLD));
     }
     s.push(" ⚠ ".fg(RED));
-    s.push(format!("P:{} ", app.infr[0]).fg(GREEN));
+    s.push(format!("P:{} ", app.infr[0]).fg(BLUE));
     s.push(format!("C:{} ", app.infr[1]).fg(RED));
     if let Some(u) = app.usage {
         s.push(trf!("· uso 5h {:.0}% ", "· 5h usage {:.0}% ", u * 100.0).fg(DIM));
@@ -323,7 +324,7 @@ fn verdict_popup(f: &mut Frame, app: &App) {
     let area = center(a, 90, a.height.saturating_sub(4));
     let inner = popup(f, area, Line::from(tr!(" ⚖ VEREDITO · Esc fecha ", " ⚖ VERDICT · Esc closes ").bold().fg(GOLD)), GOLD);
     let (who, c) = match v.vencedor.as_str() {
-        "pro" => (tr!("◆ VENCE O PRÓ", "◆ PRO WINS"), GREEN),
+        "pro" => (tr!("◆ VENCE O PRÓ", "◆ PRO WINS"), BLUE),
         "contra" => (tr!("◆ VENCE O CONTRA", "◆ CON WINS"), RED),
         _ => (tr!("= EMPATE", "= TIE"), GOLD),
     };
@@ -332,13 +333,13 @@ fn verdict_popup(f: &mut Frame, app: &App) {
     for e in &v.eixos {
         lines.push(Line::from(vec![
             format!("{}  ", e.titulo).bold(),
-            format!("{} {:.1}", Side::Pro.name(), e.nota_pro).fg(GREEN),
+            format!("{} {:.1}", Side::Pro.name(), e.nota_pro).fg(BLUE),
             "  ·  ".into(),
             format!("{} {:.1}", Side::Con.name(), e.nota_contra).fg(RED),
         ]));
         lines.push(Line::from(e.comentario.clone().fg(DIM)));
     }
-    lines.push(Line::from(vec!["Total  ".bold(), format!("{} {tp:.1}", Side::Pro.name()).fg(GREEN).bold(), "  ·  ".into(), format!("{} {tc:.1}", Side::Con.name()).fg(RED).bold()]));
+    lines.push(Line::from(vec!["Total  ".bold(), format!("{} {tp:.1}", Side::Pro.name()).fg(BLUE).bold(), "  ·  ".into(), format!("{} {tc:.1}", Side::Con.name()).fg(RED).bold()]));
     lines.push(Line::raw(""));
     lines.push(Line::from(v.justificativa.clone()));
     lines.push(Line::raw(""));
