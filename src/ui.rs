@@ -83,7 +83,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.pose[2] == Pose::Thinking {
         block = block.title_bottom(tr!(" deliberando… ", " deliberating… ").italic().fg(DIM));
     } else if !app.tool[2].is_empty() {
-        block = block.title_bottom(format!(" 🔎 {} ", app.tool[2]).italic().fg(DIM));
+        block = block.title_bottom(format!(" » {} ", app.tool[2]).italic().fg(DIM));
     }
     let lines: Vec<Line> = app.balloon.lines().map(|l| cites(l, &app.checks)).collect();
     let p = Paragraph::new(lines).wrap(Wrap { trim: true });
@@ -124,13 +124,13 @@ fn debater(f: &mut Frame, app: &App, side: Side, area: Rect) {
         Pose::Thinking => tr!("pensando…", "thinking…"),
         Pose::Talking => tr!("falando", "speaking"),
         Pose::Searching => tr!("pesquisando", "researching"),
-        Pose::Win => tr!("🏆 venceu!", "🏆 won!"),
+        Pose::Win => tr!("◆ venceu!", "◆ won!"),
         Pose::Lose => tr!("perdeu… mas com dignidade", "lost… but with dignity"),
         _ => tr!("aguardando", "waiting"),
     };
     let mut info = vec![Line::from(side.name().bold().fg(c)), Line::from(state.italic())];
     if !app.tool[i].is_empty() {
-        info.push(Line::from(format!("🔎 {}", app.tool[i]).fg(DIM)));
+        info.push(Line::from(format!("» {}", app.tool[i]).fg(DIM)));
     }
     let big = inner.height >= 14;
     let [head, body] = Layout::vertical([Length(if big { ROWS } else { 1 }), Min(1)]).areas(inner);
@@ -166,7 +166,7 @@ fn status_bar(f: &mut Frame, app: &App, area: Rect) {
     if app.waiting {
         s.push(tr!(" ⏎ ENTER: próximo turno ", " ⏎ ENTER: next turn ").bold().fg(Color::Black).bg(GOLD));
     } else if app.manual {
-        s.push(" ✋ MANUAL ".bold().fg(GOLD));
+        s.push(" ‖ MANUAL ".bold().fg(GOLD));
     }
     if !app.eixos.is_empty() {
         let dots: String = (0..app.eixos.len())
@@ -185,9 +185,9 @@ fn status_bar(f: &mut Frame, app: &App, area: Rect) {
         s.push(trf!("· uso 5h {:.0}% ", "· 5h usage {:.0}% ", u * 100.0).fg(DIM));
     }
     if app.readonly {
-        s.push(tr!("· 📖 f fontes  v veredito  q sai", "· 📖 f sources  v verdict  q quit").fg(DIM));
+        s.push(tr!("· f fontes  v veredito  q início", "· f sources  v verdict  q home").fg(DIM));
     } else {
-        s.push(trf!("· ␣ {}  p pergunta  f fontes  v veredito  q sai", "· ␣ {}  p question  f sources  v verdict  q quit", if app.manual { tr!("automático", "automatic") } else { tr!("passo a passo", "step by step") }).fg(DIM));
+        s.push(trf!("· ␣ {}  p pergunta  f fontes  v veredito  q início", "· ␣ {}  p question  f sources  v verdict  q home", if app.manual { tr!("automático", "automatic") } else { tr!("passo a passo", "step by step") }).fg(DIM));
     }
     f.render_widget(Line::from(s), area);
 }
@@ -246,7 +246,7 @@ fn sources_popup(f: &mut Frame, app: &App) {
         let label = format!(" {} · {n} ", [Side::Pro, Side::Con][k].name());
         if k == i { label.bold().fg(Color::Black).bg(color(k)) } else { label.fg(color(k)) }
     };
-    let title = Line::from(vec![tr!(" 📚 FONTES  ", " 📚 SOURCES  ").bold().fg(GOLD), tab(0), " ".into(), tab(1), " ".into()]);
+    let title = Line::from(vec![tr!(" FONTES  ", " SOURCES  ").bold().fg(GOLD), tab(0), " ".into(), tab(1), " ".into()]);
     let inner = popup(f, f.area(), title, c);
     let [body, _, hint] = Layout::vertical([Min(1), Length(1), Length(1)]).areas(inner);
     f.render_widget(Line::from(tr!("←→ troca o lado · ↑↓ PgUp PgDn Home End rola · Esc fecha", "←→ switch side · ↑↓ PgUp PgDn Home End scroll · Esc closes").fg(DIM)).centered(), hint);
@@ -323,9 +323,9 @@ fn verdict_popup(f: &mut Frame, app: &App) {
     let area = center(a, 90, a.height.saturating_sub(4));
     let inner = popup(f, area, Line::from(tr!(" ⚖ VEREDITO · Esc fecha ", " ⚖ VERDICT · Esc closes ").bold().fg(GOLD)), GOLD);
     let (who, c) = match v.vencedor.as_str() {
-        "pro" => (tr!("🏆 VENCE O PRÓ", "🏆 PRO WINS"), GREEN),
-        "contra" => (tr!("🏆 VENCE O CONTRA", "🏆 CON WINS"), RED),
-        _ => (tr!("🤝 EMPATE", "🤝 TIE"), GOLD),
+        "pro" => (tr!("◆ VENCE O PRÓ", "◆ PRO WINS"), GREEN),
+        "contra" => (tr!("◆ VENCE O CONTRA", "◆ CON WINS"), RED),
+        _ => (tr!("= EMPATE", "= TIE"), GOLD),
     };
     let mut lines = vec![Line::from(who.bold().fg(c)).centered(), Line::raw("")];
     let (tp, tc): (f64, f64) = v.eixos.iter().fold((0.0, 0.0), |(p, c), e| (p + e.nota_pro, c + e.nota_contra));
@@ -371,7 +371,7 @@ fn topic_screen(f: &mut Frame, app: &App) {
     let hint_line = if app.confirm_del {
         tr!("Del de novo apaga · outra tecla cancela", "Del again deletes · any other key cancels").bold().fg(RED)
     } else if shown > 0 {
-        tr!("Enter abre · Del apaga · Esc volta", "Enter opens · Del deletes · Esc goes back").fg(DIM)
+        tr!("Enter abre · Del apaga · Esc volta · q sai", "Enter opens · Del deletes · Esc goes back · q quits").fg(DIM)
     } else if !app.saved_list.is_empty() {
         tr!("Enter começa · ↓ debates salvos · Esc sai", "Enter starts · ↓ saved debates · Esc quits").fg(DIM)
     } else {
