@@ -42,10 +42,6 @@ const WIG: [&str; 5] = [
 ];
 const GAVEL_UP: [&str; 5] = ["DDD", "DDD", ".b.", ".b.", ".b."];
 const GAVEL_DOWN: [&str; 2] = ["bDD", ".DD"];
-/// Lupa na frente de um olho, que aparece ampliado (KK) dentro da lente.
-const LENS: [&str; 8] = [".ssss...", "sggggs..", "sgKKgs..", "sgKKgs..", "sggggs..", ".ssssD..", "......D.", ".......D"];
-/// Posição x da lupa a cada 2 ticks: olho esquerdo → desliza → olho direito → volta.
-const LENS_PATH: [i32; 10] = [5, 5, 5, 5, 7, 10, 10, 10, 10, 8];
 
 type Grid = [[Option<Color>; W]; H];
 
@@ -59,8 +55,6 @@ fn color(c: char) -> Option<Color> {
         'G' => Color::Rgb(76, 175, 80),
         'R' => Color::Rgb(229, 57, 53),
         'c' => Color::Rgb(120, 200, 230),
-        's' => Color::Rgb(200, 205, 215),
-        'g' => Color::Rgb(170, 220, 240),
         'B' => Color::Rgb(90, 150, 255),
         'y' => Color::Rgb(255, 215, 64),
         'm' => Color::Rgb(220, 90, 220),
@@ -110,7 +104,7 @@ pub fn render(side: Side, pose: Pose, tick: u64) -> Vec<Line<'static>> {
             put(&mut g, 9, 6 + dy, 'K');
             put(&mut g, 10, 6 + dy, 'K');
         }
-        Pose::Thinking => {
+        Pose::Thinking | Pose::Searching => {
             eyes(&mut g, dy, (1, -1), &[3, 4]);
             for (i, (x, y)) in [(15, 1), (17, 0), (19, 0)].into_iter().enumerate() {
                 if (tick / 3 % 4) as usize > i {
@@ -118,7 +112,6 @@ pub fn render(side: Side, pose: Pose, tick: u64) -> Vec<Line<'static>> {
                 }
             }
         }
-        Pose::Searching => draw(&mut g, &LENS, LENS_PATH[(tick / 2) as usize % LENS_PATH.len()], 0),
         Pose::Win => {
             for (x, y) in [(3, 5), (4, 5), (3, 6), (4, 6), (15, 5), (16, 5), (15, 6), (16, 6)] {
                 put(&mut g, x, y + dy, '_');
