@@ -7,6 +7,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 const JUDGE_MODEL: &str = "claude-opus-5-5";
 const DEBATER_MODEL: &str = "claude-sonnet-5-5";
 const MAX_ROUNDS: usize = 3;
+/// Teto da pauta, mesmo com o juiz incluindo eixos no meio do debate.
+const MAX_EIXOS: usize = 6;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Side {
@@ -68,6 +70,8 @@ pub struct Check {
     pub infracoes: Vec<Infracao>,
     pub fontes_verificadas: Vec<Verificacao>,
     pub encerrar_eixo: bool,
+    /// Pauta revisada ao encerrar o eixo: os eixos que vêm depois dele (None mantém a atual).
+    pub proximos_eixos: Option<Vec<Eixo>>,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NotaEixo {
@@ -84,30 +88,34 @@ pub struct Verdict {
     pub infracoes_resumo: String,
 }
 
-const FRAMING_SCHEMA: &str = r#"{"type":"object","properties":{"definicoes":{"type":"string"},"onus_da_prova":{"type":"string"},"eixos":{"type":"array","minItems":3,"maxItems":5,"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}},"regras":{"type":"string"}},"required":["definicoes","onus_da_prova","eixos","regras"]}"#;
+const FRAMING_SCHEMA: &str = r#"{"type":"object","properties":{"definicoes":{"type":"string"},"onus_da_prova":{"type":"string"},"eixos":{"type":"array","minItems":1,"maxItems":6,"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}},"regras":{"type":"string"}},"required":["definicoes","onus_da_prova","eixos","regras"]}"#;
 const DOSSIE_SCHEMA: &str = r#"{"type":"object","properties":{"tese":{"type":"string"},"fontes":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"url":{"type":"string"},"titulo":{"type":"string"},"trecho":{"type":"string"}},"required":["id","url","titulo","trecho"]}},"argumentos":{"type":"array","items":{"type":"string"}}},"required":["tese","fontes","argumentos"]}"#;
-const CHECK_SCHEMA: &str = r#"{"type":"object","properties":{"intervencao":{"type":["string","null"]},"infracoes":{"type":"array","items":{"type":"object","properties":{"lado":{"enum":["pro","contra"]},"tipo":{"type":"string"},"trecho":{"type":"string"},"explicacao":{"type":"string"}},"required":["lado","tipo","trecho","explicacao"]}},"fontes_verificadas":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"ok":{"type":"boolean"},"nota":{"type":"string"}},"required":["id","ok","nota"]}},"encerrar_eixo":{"type":"boolean"}},"required":["intervencao","infracoes","fontes_verificadas","encerrar_eixo"]}"#;
+const CHECK_SCHEMA: &str = r#"{"type":"object","properties":{"intervencao":{"type":["string","null"]},"infracoes":{"type":"array","items":{"type":"object","properties":{"lado":{"enum":["pro","contra"]},"tipo":{"type":"string"},"trecho":{"type":"string"},"explicacao":{"type":"string"}},"required":["lado","tipo","trecho","explicacao"]}},"fontes_verificadas":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"ok":{"type":"boolean"},"nota":{"type":"string"}},"required":["id","ok","nota"]}},"encerrar_eixo":{"type":"boolean"},"proximos_eixos":{"type":["array","null"],"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}}},"required":["intervencao","infracoes","fontes_verificadas","encerrar_eixo","proximos_eixos"]}"#;
 const ASK_SCHEMA: &str = r#"{"type":"object","properties":{"destino":{"enum":["juiz","pro","contra"]},"resposta":{"type":"string"}},"required":["destino","resposta"]}"#;
 const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"vencedor":{"enum":["pro","contra","empate"]},"justificativa":{"type":"string"},"eixos":{"type":"array","items":{"type":"object","properties":{"titulo":{"type":"string"},"nota_pro":{"type":"number"},"nota_contra":{"type":"number"},"comentario":{"type":"string"}},"required":["titulo","nota_pro","nota_contra","comentario"]}},"infracoes_resumo":{"type":"string"}},"required":["vencedor","justificativa","eixos","infracoes_resumo"]}"#;
 
 const JUDGE_SYSTEM: &str = "Você é o JUIZ e mediador de um debate entre dois agentes de IA: PRÓ (favorável ao tema) e CONTRA (contrário). \
 Você é neutro e fala pouco. Suas funções:
-1. Enquadrar o debate: definições, ônus da prova e de 3 a 5 eixos (prefira 3 ou 4), que são os subtemas que orbitam o tema principal.
+1. Enquadrar o debate: definições, ônus da prova e os eixos, que são os subtemas que orbitam o tema principal. A quantidade depende do tema: \
+só os eixos que realmente decidem a questão (um tema simples pode ter 1 ou 2; um complexo, até 6), sem eixos redundantes ou periféricos.
 2. Ao fim de cada rodada, apontar falácias (espantalho, ad hominem, falso dilema, apelo à emoção no lugar de evidência, \
 generalização apressada, cherry-picking, etc.), afirmações falsas ou sem fonte e citações distorcidas. Use WebFetch para conferir \
 por amostragem as fontes citadas que parecerem duvidosas ou decisivas (no máximo 2 por rodada). Só registre infrações reais e relevantes.
-3. Decidir quando um eixo se esgotou (argumentos se repetindo, ou o ponto central já respondido pelos dois).
+3. Decidir quando um eixo se esgotou (argumentos se repetindo, ou o ponto central já respondido pelos dois) e, ao encerrá-lo, revisar a pauta: \
+retirar eixos que ficaram desnecessários (já cobertos ou irrelevantes) e incluir os mais importantes que surgiram no debate.
 4. Dar o veredito: quem ARGUMENTOU melhor (evidência, lógica, honestidade, resposta direta ao oponente), não quem \"tem razão\". \
 Conceder pontos verdadeiros do oponente é virtude, não fraqueza. Nunca puna um lado pela posição que defende, só pela conduta argumentativa.
 Escreva em português. Intervenções têm no máximo 2 frases, com tom de juiz espirituoso mas sério; se não houver nada relevante a dizer, intervencao = null.";
 
 const JUDGE_SYSTEM_EN: &str = "You are the JUDGE and moderator of a debate between two AI agents: PRO (in favor of the motion) and CON (against it). \
 You are neutral and speak little. Your duties:
-1. Frame the debate: definitions, burden of proof and 3 to 5 issues (prefer 3 or 4), the subtopics that orbit the main motion.
+1. Frame the debate: definitions, burden of proof and the issues, the subtopics that orbit the main motion. How many depends on the motion: \
+only the issues that really decide the question (a simple motion may have 1 or 2; a complex one, up to 6), no redundant or peripheral ones.
 2. At the end of each round, point out fallacies (straw man, ad hominem, false dilemma, appeal to emotion instead of evidence, \
 hasty generalization, cherry-picking, etc.), false or unsourced claims and distorted quotes. Use WebFetch to spot-check \
 cited sources that look dubious or decisive (at most 2 per round). Only record real, relevant infractions.
-3. Decide when an issue is exhausted (arguments repeating, or the core point already answered by both).
+3. Decide when an issue is exhausted (arguments repeating, or the core point already answered by both) and, when closing it, revise the agenda: \
+drop issues that became unnecessary (already covered or irrelevant) and add the more important ones that came up in the debate.
 4. Deliver the verdict: who ARGUED better (evidence, logic, honesty, directly answering the opponent), not who \"is right\". \
 Conceding the opponent's true points is a virtue, not a weakness. Never penalize a side for the position it defends, only for its argumentative conduct.
 Write in English. Interventions are at most 2 sentences, in the tone of a witty but serious judge; if there is nothing relevant to say, intervencao = null.";
@@ -144,6 +152,8 @@ pub enum Msg {
     Phase(String),
     Framing(Framing),
     Eixo(usize),
+    /// O juiz revisou a pauta: a lista completa de eixos.
+    Pauta(Vec<Eixo>),
     Busy(Side),
     Start(Side, String),
     Token(Side, String),
@@ -502,8 +512,11 @@ only one short sentence handing over the floor."
         // ao retomar, pula os passos já feitos
         let feito = self.rec.feito;
         let todo = |p: (usize, usize, usize)| feito.is_none_or(|d| p > d);
-        let n = f.eixos.len();
-        for (i, eixo) in f.eixos.iter().enumerate() {
+        // a pauta pode mudar a cada eixo encerrado, então relê a cada volta
+        let len = |r: &Record| r.enquadramento.as_ref().map_or(0, |f| f.eixos.len());
+        for i in 0.. {
+            let Some(eixo) = self.rec.enquadramento.as_ref().and_then(|f| f.eixos.get(i)).cloned() else { break };
+            let n = len(&self.rec);
             if !todo((i, MAX_ROUNDS, 2)) {
                 continue;
             }
@@ -529,11 +542,17 @@ only one short sentence handing over the floor."
                     continue;
                 }
                 let last = round == MAX_ROUNDS;
+                let rest = self.rec.enquadramento.as_ref().map(|f| f.eixos[i + 1..].iter().map(|e| e.titulo.clone()).collect::<Vec<_>>().join(" · ")).unwrap_or_default();
                 let instr = trf!(
-                    "Fim da rodada {round} do eixo «{}». Avalie as falas desta rodada. encerrar_eixo = true se o eixo se esgotou{}.",
-                    "End of round {round} of the issue «{}». Evaluate this round's speeches. encerrar_eixo = true if the issue is exhausted{}.",
+                    "Fim da rodada {round} do eixo «{}». Avalie as falas desta rodada. encerrar_eixo = true se o eixo se esgotou{}.\n\
+Pauta restante: {}. Se o eixo for encerrado, proximos_eixos = a lista completa dos eixos que virão depois dele (retire os desnecessários, \
+inclua os mais importantes que surgiram; lista vazia leva às considerações finais), ou null para manter a pauta.",
+                    "End of round {round} of the issue «{}». Evaluate this round's speeches. encerrar_eixo = true if the issue is exhausted{}.\n\
+Remaining agenda: {}. If the issue is closed, proximos_eixos = the full list of issues to come after it (drop the unnecessary ones, \
+add the more important ones that came up; an empty list goes to closing statements), or null to keep the agenda.",
                     eixo.titulo,
-                    if last { tr!(" (esta é a última rodada permitida; o eixo será encerrado de qualquer forma)", " (this is the last round allowed; the issue will be closed either way)") } else { "" }
+                    if last { tr!(" (esta é a última rodada permitida; o eixo será encerrado de qualquer forma)", " (this is the last round allowed; the issue will be closed either way)") } else { "" },
+                    if rest.is_empty() { tr!("nenhum", "none").to_string() } else { rest }
                 );
                 let c: Check = self.ask_json(Side::Judge, &instr, CHECK_SCHEMA).await?;
                 for inf in &c.infracoes {
@@ -552,9 +571,23 @@ only one short sentence handing over the floor."
                 let close = c.encerrar_eixo;
                 let titulo = trf!("eixo {}: avaliação da rodada {round}", "issue {}: round {round} assessment", i + 1);
                 self.rec.transcricao.push(Entry { quem: Side::Judge.name().into(), titulo, texto: check_text(&c), avaliacao: Some(c.clone()) });
+                self.send(Msg::Check(c.clone()));
+                if let (true, Some(mut next)) = (close || last, c.proximos_eixos) {
+                    next.truncate(MAX_EIXOS.saturating_sub(i + 1));
+                    let titles = |v: &[Eixo]| v.iter().map(|e| e.titulo.clone()).collect::<Vec<_>>();
+                    if let Some(f) = self.rec.enquadramento.as_mut()
+                        && titles(&f.eixos[i + 1..]) != titles(&next)
+                    {
+                        f.eixos.truncate(i + 1);
+                        f.eixos.extend(next);
+                        let eixos = f.eixos.clone();
+                        let list: Vec<String> = eixos.iter().enumerate().map(|(k, e)| format!("{}. {} — {}", k + 1, e.titulo, e.pergunta)).collect();
+                        self.log(Side::Judge.name(), tr!("pauta revisada", "revised agenda"), &list.join("\n"));
+                        self.send(Msg::Pauta(eixos));
+                    }
+                }
                 // eixo encerrado conta como todas as rodadas feitas
                 self.mark((i, if close { MAX_ROUNDS } else { round }, 2));
-                self.send(Msg::Check(c));
                 self.checkpoint().await?;
                 if close {
                     break;
@@ -562,6 +595,7 @@ only one short sentence handing over the floor."
             }
         }
 
+        let n = len(&self.rec);
         self.send(Msg::Phase(tr!("Considerações finais", "Closing statements").into()));
         for (k, side) in [Side::Pro, Side::Con].into_iter().enumerate() {
             if !todo((n, 0, k)) {

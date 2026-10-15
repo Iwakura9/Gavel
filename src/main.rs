@@ -145,6 +145,11 @@ impl App {
                 self.balloon = trf!("{}\n\n▶ Eixo {}/{}: {} — {}", "{}\n\n▶ Issue {}/{}: {} — {}", self.balloon, i + 1, self.eixos.len(), e.titulo, e.pergunta);
                 self.say_judge();
             }
+            Msg::Pauta(eixos) => {
+                let list: Vec<String> = eixos.iter().enumerate().map(|(i, e)| format!("{}) {}", i + 1, e.titulo)).collect();
+                self.balloon = trf!("{}\n\n↻ Pauta revisada: {}", "{}\n\n↻ Revised agenda: {}", self.balloon, list.join(" · "));
+                self.eixos = eixos;
+            }
             Msg::Busy(s) => {
                 self.pose[s as usize] = Pose::Thinking;
                 self.tool[s as usize].clear();
@@ -350,6 +355,7 @@ async fn plain(topic: String) {
             Msg::Phase(p) => println!("\n===== {p} ====="),
             Msg::Framing(f) => println!("[{}] {}: {:?}", Side::Judge.name(), tr!("eixos", "issues"), f.eixos.iter().map(|e| &e.titulo).collect::<Vec<_>>()),
             Msg::Eixo(i) => println!("\n--- {} {} ---", tr!("eixo", "issue"), i + 1),
+            Msg::Pauta(e) => println!("[{}] {}: {:?}", Side::Judge.name(), tr!("pauta revisada", "revised agenda"), e.iter().map(|e| &e.titulo).collect::<Vec<_>>()),
             Msg::Busy(s) => println!("[{}] {}", s.name(), tr!("pensando…", "thinking…")),
             Msg::Start(s, t) => print!("\n[{} · {t}] ", s.name()),
             Msg::Token(_, t) => print!("{t}"),
