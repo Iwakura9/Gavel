@@ -2,7 +2,7 @@
 # Finge ser o `claude -p --output-format stream-json` para testar a TUI sem gastar limite.
 # Uso: GAVEL_CLAUDE_BIN=tests/fake-claude.sh cargo run -- "tema"
 schema=""; prev=""; side=P
-for a in "$@"; do [[ $prev == --json-schema ]] && schema=$a; [[ $a == *"debatedor CONTRA"* ]] && side=C; prev=$a; done
+for a in "$@"; do [[ $prev == --json-schema ]] && schema=$a; [[ $a == *"debatedor CONTRA"* || $a == *"CON debater"* ]] && side=C; prev=$a; done
 cat >/dev/null # consome o prompt
 sid="fake-$$"
 emit() { printf '%s\n' "$1"; }
