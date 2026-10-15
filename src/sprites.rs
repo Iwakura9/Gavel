@@ -42,8 +42,10 @@ const WIG: [&str; 5] = [
 ];
 const GAVEL_UP: [&str; 5] = ["DDD", "DDD", ".b.", ".b.", ".b."];
 const GAVEL_DOWN: [&str; 2] = ["bDD", ".DD"];
-const FLAG: [&str; 9] = ["bXXX", "bXXX", "bXX.", "b...", "bo..", "b...", "b...", "b...", "b..."];
-const LENS: [&str; 4] = ["ccc", "c_c", "ccc", "b.."];
+/// Lupa na frente de um olho, que aparece ampliado (KK) dentro da lente.
+const LENS: [&str; 8] = [".ssss...", "sggggs..", "sgKKgs..", "sgKKgs..", "sggggs..", ".ssssD..", "......D.", ".......D"];
+/// Posição x da lupa a cada 2 ticks: olho esquerdo → desliza → olho direito → volta.
+const LENS_PATH: [i32; 10] = [5, 5, 5, 5, 7, 10, 10, 10, 10, 8];
 
 type Grid = [[Option<Color>; W]; H];
 
@@ -57,6 +59,8 @@ fn color(c: char) -> Option<Color> {
         'G' => Color::Rgb(76, 175, 80),
         'R' => Color::Rgb(229, 57, 53),
         'c' => Color::Rgb(120, 200, 230),
+        's' => Color::Rgb(200, 205, 215),
+        'g' => Color::Rgb(170, 220, 240),
         'B' => Color::Rgb(90, 150, 255),
         'y' => Color::Rgb(255, 215, 64),
         'm' => Color::Rgb(220, 90, 220),
@@ -70,11 +74,11 @@ fn put(g: &mut Grid, x: i32, y: i32, c: char) {
     }
 }
 
-fn draw(g: &mut Grid, art: &[&str], dx: i32, dy: i32, swap: (char, char)) {
+fn draw(g: &mut Grid, art: &[&str], dx: i32, dy: i32) {
     for (y, row) in art.iter().enumerate() {
         for (x, ch) in row.chars().enumerate() {
             if ch != '.' {
-                put(g, x as i32 + dx, y as i32 + dy, if ch == swap.0 { swap.1 } else { ch });
+                put(g, x as i32 + dx, y as i32 + dy, ch);
             }
         }
     }
@@ -99,7 +103,7 @@ pub fn render(side: Side, pose: Pose, tick: u64) -> Vec<Line<'static>> {
         Pose::Lose => 1,
         _ => 0,
     };
-    draw(&mut g, &BODY, 0, dy, ('.', '.'));
+    draw(&mut g, &BODY, 0, dy);
 
     match pose {
         Pose::Talking if tick.is_multiple_of(2) => {
@@ -114,10 +118,7 @@ pub fn render(side: Side, pose: Pose, tick: u64) -> Vec<Line<'static>> {
                 }
             }
         }
-        Pose::Searching => {
-            eyes(&mut g, dy, (1, 0), &[3, 4]);
-            draw(&mut g, &LENS, 16, 1 + (tick / 3 % 2) as i32, ('.', '.'));
-        }
+        Pose::Searching => draw(&mut g, &LENS, LENS_PATH[(tick / 2) as usize % LENS_PATH.len()], 0),
         Pose::Win => {
             for (x, y) in [(3, 5), (4, 5), (3, 6), (4, 6), (15, 5), (16, 5), (15, 6), (16, 6)] {
                 put(&mut g, x, y + dy, '_');
@@ -142,26 +143,20 @@ pub fn render(side: Side, pose: Pose, tick: u64) -> Vec<Line<'static>> {
 
     match side {
         Side::Judge => {
-            draw(&mut g, &WIG, 0, dy, ('.', '.'));
+            draw(&mut g, &WIG, 0, dy);
             match pose {
                 Pose::Objection if tick / 2 % 2 == 1 => {
-                    draw(&mut g, &GAVEL_DOWN, 17, 5, ('.', '.'));
+                    draw(&mut g, &GAVEL_DOWN, 17, 5);
                     for (x, y) in [(16, 8), (19, 8), (18, 9)] {
                         put(&mut g, x, y, 'y');
                     }
                 }
-                Pose::Idle | Pose::Talking | Pose::Objection => draw(&mut g, &GAVEL_UP, 16, dy, ('.', '.')),
+                Pose::Idle | Pose::Talking | Pose::Objection => draw(&mut g, &GAVEL_UP, 16, dy),
                 _ => {}
             }
         }
-        Side::Pro | Side::Con => {
-            if pose != Pose::Win {
-                draw(&mut g, &FLAG, 1, 1 + dy, ('X', if side == Side::Pro { 'G' } else { 'R' })); // vencedor larga a bandeira
-            }
-            if side == Side::Con {
-                g.iter_mut().for_each(|row| row.reverse()); // espelha: Contra olha para o centro
-            }
-        }
+        Side::Con => g.iter_mut().for_each(|row| row.reverse()), // espelha: Contra olha para o centro
+        Side::Pro => {}
     }
 
     (0..H / 2)
