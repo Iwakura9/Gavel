@@ -6,7 +6,12 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 const JUDGE_MODEL: &str = "claude-opus-5-5";
 const DEBATER_MODEL: &str = "claude-sonnet-5-5";
-const MAX_ROUNDS: usize = 3;
+/// Teto de rodadas por eixo, só como trava de custo: o juiz encerra antes, em consenso ou impasse.
+const MAX_ROUNDS: usize = 6;
+/// Antes disso quem abriu o eixo ainda não respondeu ao oponente.
+const MIN_ROUNDS: usize = 2;
+/// Rodada registrada em `feito` quando o eixo se encerra.
+const CLOSED: usize = usize::MAX;
 /// Teto da pauta, mesmo com o juiz incluindo eixos no meio do debate.
 const MAX_EIXOS: usize = 6;
 
@@ -69,10 +74,33 @@ pub struct Check {
     pub intervencao: Option<String>,
     pub infracoes: Vec<Infracao>,
     pub fontes_verificadas: Vec<Verificacao>,
+    /// Com o eixo em aberto: a questão que a próxima réplica deve enfrentar.
+    #[serde(default)]
+    pub ponto_em_disputa: Option<String>,
+    /// em_aberto, consenso ou impasse; só os dois últimos encerram o eixo.
+    #[serde(default)]
+    pub estado_eixo: String,
+    /// Registros antigos, de quando o juiz só dizia se encerrava o eixo.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub encerrar_eixo: bool,
     /// Pauta revisada ao encerrar o eixo: os eixos que vêm depois dele (None mantém a atual).
     pub proximos_eixos: Option<Vec<Eixo>>,
 }
+impl Check {
+    pub fn closes(&self) -> bool {
+        self.encerrar_eixo || matches!(self.estado_eixo.as_str(), "consenso" | "impasse")
+    }
+
+    /// O andamento do eixo em uma linha, para a tela e o registro.
+    pub fn status(&self) -> Option<String> {
+        match self.estado_eixo.as_str() {
+            "consenso" => Some(tr!("■ Eixo encerrado: consenso.", "■ Issue closed: consensus.").into()),
+            "impasse" => Some(tr!("■ Eixo encerrado: impasse.", "■ Issue closed: impasse.").into()),
+            _ => self.ponto_em_disputa.as_ref().map(|p| trf!("→ Em disputa: {p}", "→ In dispute: {p}")),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NotaEixo {
     pub titulo: String,
@@ -90,7 +118,7 @@ pub struct Verdict {
 
 const FRAMING_SCHEMA: &str = r#"{"type":"object","properties":{"definicoes":{"type":"string"},"onus_da_prova":{"type":"string"},"eixos":{"type":"array","minItems":1,"maxItems":6,"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}},"regras":{"type":"string"}},"required":["definicoes","onus_da_prova","eixos","regras"]}"#;
 const DOSSIE_SCHEMA: &str = r#"{"type":"object","properties":{"tese":{"type":"string"},"fontes":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"url":{"type":"string"},"titulo":{"type":"string"},"trecho":{"type":"string"}},"required":["id","url","titulo","trecho"]}},"argumentos":{"type":"array","items":{"type":"string"}}},"required":["tese","fontes","argumentos"]}"#;
-const CHECK_SCHEMA: &str = r#"{"type":"object","properties":{"intervencao":{"type":["string","null"]},"infracoes":{"type":"array","items":{"type":"object","properties":{"lado":{"enum":["pro","contra"]},"tipo":{"type":"string"},"trecho":{"type":"string"},"explicacao":{"type":"string"}},"required":["lado","tipo","trecho","explicacao"]}},"fontes_verificadas":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"ok":{"type":"boolean"},"nota":{"type":"string"}},"required":["id","ok","nota"]}},"encerrar_eixo":{"type":"boolean"},"proximos_eixos":{"type":["array","null"],"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}}},"required":["intervencao","infracoes","fontes_verificadas","encerrar_eixo","proximos_eixos"]}"#;
+const CHECK_SCHEMA: &str = r#"{"type":"object","properties":{"intervencao":{"type":["string","null"]},"infracoes":{"type":"array","items":{"type":"object","properties":{"lado":{"enum":["pro","contra"]},"tipo":{"type":"string"},"trecho":{"type":"string"},"explicacao":{"type":"string"}},"required":["lado","tipo","trecho","explicacao"]}},"fontes_verificadas":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"ok":{"type":"boolean"},"nota":{"type":"string"}},"required":["id","ok","nota"]}},"ponto_em_disputa":{"type":["string","null"]},"estado_eixo":{"enum":["em_aberto","consenso","impasse"]},"proximos_eixos":{"type":["array","null"],"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}}},"required":["intervencao","infracoes","fontes_verificadas","ponto_em_disputa","estado_eixo","proximos_eixos"]}"#;
 const ASK_SCHEMA: &str = r#"{"type":"object","properties":{"destino":{"enum":["juiz","pro","contra"]},"resposta":{"type":"string"}},"required":["destino","resposta"]}"#;
 const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"vencedor":{"enum":["pro","contra","empate"]},"justificativa":{"type":"string"},"eixos":{"type":"array","items":{"type":"object","properties":{"titulo":{"type":"string"},"nota_pro":{"type":"number"},"nota_contra":{"type":"number"},"comentario":{"type":"string"}},"required":["titulo","nota_pro","nota_contra","comentario"]}},"infracoes_resumo":{"type":"string"}},"required":["vencedor","justificativa","eixos","infracoes_resumo"]}"#;
 
@@ -101,8 +129,10 @@ só os eixos que realmente decidem a questão (um tema simples pode ter 1 ou 2; 
 2. Ao fim de cada rodada, apontar falácias (espantalho, ad hominem, falso dilema, apelo à emoção no lugar de evidência, \
 generalização apressada, cherry-picking, etc.), afirmações falsas ou sem fonte e citações distorcidas. Use WebFetch para conferir \
 por amostragem as fontes citadas que parecerem duvidosas ou decisivas (no máximo 2 por rodada). Só registre infrações reais e relevantes.
-3. Decidir quando um eixo se esgotou (argumentos se repetindo, ou o ponto central já respondido pelos dois) e, ao encerrá-lo, revisar a pauta: \
-retirar eixos que ficaram desnecessários (já cobertos ou irrelevantes) e incluir os mais importantes que surgiram no debate.
+3. Conduzir cada eixo até ele se resolver; não há número fixo de rodadas. O eixo só termina em consenso (os dois lados aceitam explicitamente \
+a mesma resposta à pergunta do eixo; concessões parciais não bastam) ou em impasse (uma rodada inteira sem argumento nem evidência nova, \
+com a discordância reduzida a uma premissa que nenhum dos dois vai abandonar). Enquanto estiver em aberto, indique o ponto em disputa que a \
+próxima réplica deve enfrentar. Ao encerrar um eixo, revise a pauta: retirar eixos que ficaram desnecessários (já cobertos ou irrelevantes) e incluir os mais importantes que surgiram no debate.
 4. Dar o veredito: quem ARGUMENTOU melhor (evidência, lógica, honestidade, resposta direta ao oponente), não quem \"tem razão\". \
 Nunca puna um lado pela posição que defende, só pela conduta argumentativa.
 Os debatedores são advogados das suas posições: defender a própria tese com firmeza é o papel deles. Conceder não é mérito em si: \
@@ -117,8 +147,10 @@ only the issues that really decide the question (a simple motion may have 1 or 2
 2. At the end of each round, point out fallacies (straw man, ad hominem, false dilemma, appeal to emotion instead of evidence, \
 hasty generalization, cherry-picking, etc.), false or unsourced claims and distorted quotes. Use WebFetch to spot-check \
 cited sources that look dubious or decisive (at most 2 per round). Only record real, relevant infractions.
-3. Decide when an issue is exhausted (arguments repeating, or the core point already answered by both) and, when closing it, revise the agenda: \
-drop issues that became unnecessary (already covered or irrelevant) and add the more important ones that came up in the debate.
+3. Carry each issue until it is resolved; there is no fixed number of rounds. An issue only ends in consensus (both sides explicitly accept \
+the same answer to the issue's question; partial concessions are not enough) or in impasse (a whole round with no new argument or evidence, \
+with the disagreement narrowed down to a premise neither side will give up). While it is open, name the point in dispute that the next \
+rebuttal must address. When closing an issue, revise the agenda: drop issues that became unnecessary (already covered or irrelevant) and add the more important ones that came up in the debate.
 4. Deliver the verdict: who ARGUED better (evidence, logic, honesty, directly answering the opponent), not who \"is right\". \
 Never penalize a side for the position it defends, only for its argumentative conduct.
 The debaters are advocates for their positions: defending their own thesis firmly is their job. Conceding is not a merit in itself: \
@@ -236,7 +268,7 @@ impl Record {
             let (i, round) = (nums.first()?.checked_sub(1)?, nums.get(1).copied().unwrap_or(1));
             Some(match side {
                 Some(s) => (i, round, (s != if i % 2 == 0 { Side::Pro } else { Side::Con }) as usize),
-                None if e.avaliacao.as_ref().is_some_and(|c| c.encerrar_eixo) => (i, MAX_ROUNDS, 2),
+                None if e.avaliacao.as_ref().is_some_and(Check::closes) => (i, CLOSED, 2),
                 None => (i, round, 2),
             })
         })
@@ -405,6 +437,9 @@ fn check_text(c: &Check) -> String {
     for v in &c.fontes_verificadas {
         s += &format!("\n{} [{}] {}", if v.ok { "✓" } else { "✗" }, v.id, v.nota);
     }
+    if let Some(st) = c.status() {
+        s += &format!("\n{st}");
+    }
     s.trim().to_string()
 }
 
@@ -529,7 +564,7 @@ only one short sentence handing over the floor."
         for i in 0.. {
             let Some(eixo) = self.rec.enquadramento.as_ref().and_then(|f| f.eixos.get(i)).cloned() else { break };
             let n = len(&self.rec);
-            if !todo((i, MAX_ROUNDS, 2)) {
+            if !todo((i, CLOSED, 2)) {
                 continue;
             }
             self.send(Msg::Eixo(i));
@@ -554,19 +589,38 @@ only one short sentence handing over the floor."
                     continue;
                 }
                 let last = round == MAX_ROUNDS;
+                let when = if round < MIN_ROUNDS {
+                    trf!(" Antes da rodada {MIN_ROUNDS} o eixo não pode ser encerrado: estado_eixo = em_aberto.", " Before round {MIN_ROUNDS} the issue cannot be closed: estado_eixo = em_aberto.")
+                } else if last {
+                    tr!(" Esta é a última rodada permitida: o eixo será encerrado de qualquer forma, em consenso ou impasse.", " This is the last round allowed: the issue will be closed either way, in consensus or impasse.").into()
+                } else {
+                    String::new()
+                };
                 let rest = self.rec.enquadramento.as_ref().map(|f| f.eixos[i + 1..].iter().map(|e| e.titulo.clone()).collect::<Vec<_>>().join(" · ")).unwrap_or_default();
                 let instr = trf!(
-                    "Fim da rodada {round} do eixo «{}». Avalie as falas desta rodada. encerrar_eixo = true se o eixo se esgotou{}.\n\
+                    "Fim da rodada {round} do eixo «{}». Avalie as falas desta rodada.{when}\n\
+estado_eixo = consenso, impasse ou em_aberto. Se em_aberto, ponto_em_disputa = a questão concreta que a próxima réplica deve enfrentar; senão null.\n\
 Pauta restante: {}. Se o eixo for encerrado, proximos_eixos = a lista completa dos eixos que virão depois dele (retire os desnecessários, \
 inclua os mais importantes que surgiram; lista vazia leva às considerações finais), ou null para manter a pauta.",
-                    "End of round {round} of the issue «{}». Evaluate this round's speeches. encerrar_eixo = true if the issue is exhausted{}.\n\
+                    "End of round {round} of the issue «{}». Evaluate this round's speeches.{when}\n\
+estado_eixo = consenso, impasse or em_aberto. If em_aberto, ponto_em_disputa = the concrete question the next rebuttal must address; otherwise null.\n\
 Remaining agenda: {}. If the issue is closed, proximos_eixos = the full list of issues to come after it (drop the unnecessary ones, \
 add the more important ones that came up; an empty list goes to closing statements), or null to keep the agenda.",
                     eixo.titulo,
-                    if last { tr!(" (esta é a última rodada permitida; o eixo será encerrado de qualquer forma)", " (this is the last round allowed; the issue will be closed either way)") } else { "" },
                     if rest.is_empty() { tr!("nenhum", "none").to_string() } else { rest }
                 );
-                let c: Check = self.ask_json(Side::Judge, &instr, CHECK_SCHEMA).await?;
+                let mut c: Check = self.ask_json(Side::Judge, &instr, CHECK_SCHEMA).await?;
+                // o mínimo e o teto de rodadas valem mesmo se o juiz discordar
+                let close = last || (round >= MIN_ROUNDS && c.closes());
+                if close {
+                    c.ponto_em_disputa = None;
+                    if !c.closes() {
+                        c.estado_eixo = "impasse".into();
+                    }
+                } else {
+                    c.estado_eixo = "em_aberto".into();
+                    c.proximos_eixos = None;
+                }
                 for inf in &c.infracoes {
                     let side = if inf.lado == "pro" { Side::Pro } else { Side::Con };
                     self.rec.pendentes[side as usize].push(trf!("O JUIZ apontou uma infração sua: {} — {} («{}»)", "The JUDGE flagged an infraction of yours: {} — {} («{}»)", inf.tipo, inf.explicacao, inf.trecho));
@@ -580,11 +634,15 @@ add the more important ones that came up; an empty list goes to closing statemen
                         self.rec.pendentes[side as usize].push(trf!("O JUIZ disse: {t}", "The JUDGE said: {t}"));
                     }
                 }
-                let close = c.encerrar_eixo;
+                if let Some(p) = &c.ponto_em_disputa {
+                    for side in [Side::Pro, Side::Con] {
+                        self.rec.pendentes[side as usize].push(trf!("O JUIZ indicou o ponto em disputa, que sua réplica deve enfrentar: {p}", "The JUDGE named the point in dispute, which your rebuttal must address: {p}"));
+                    }
+                }
                 let titulo = trf!("eixo {}: avaliação da rodada {round}", "issue {}: round {round} assessment", i + 1);
                 self.rec.transcricao.push(Entry { quem: Side::Judge.name().into(), titulo, texto: check_text(&c), avaliacao: Some(c.clone()) });
                 self.send(Msg::Check(c.clone()));
-                if let (true, Some(mut next)) = (close || last, c.proximos_eixos) {
+                if let (true, Some(mut next)) = (close, c.proximos_eixos) {
                     next.truncate(MAX_EIXOS.saturating_sub(i + 1));
                     let titles = |v: &[Eixo]| v.iter().map(|e| e.titulo.clone()).collect::<Vec<_>>();
                     if let Some(f) = self.rec.enquadramento.as_mut()
@@ -599,7 +657,7 @@ add the more important ones that came up; an empty list goes to closing statemen
                     }
                 }
                 // eixo encerrado conta como todas as rodadas feitas
-                self.mark((i, if close { MAX_ROUNDS } else { round }, 2));
+                self.mark((i, if close { CLOSED } else { round }, 2));
                 self.checkpoint().await?;
                 if close {
                     break;
@@ -720,7 +778,7 @@ fn markdown(r: &Record) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Record, Side};
+    use super::{CLOSED, Record, Side};
 
     #[test]
     fn old_records_resume_where_they_stopped() {
@@ -738,7 +796,12 @@ mod tests {
         // eixo 2 começa pelo CONTRA; perguntas da plateia não contam
         let r = old(&[framing.clone(), entry("CONTRA", "eixo 2: abertura"), entry("JUIZ", "pergunta da plateia: 3 rodadas?")]);
         assert_eq!(r.infer_feito(), Some((1, 1, 0)));
-        assert_eq!(old(&[framing, entry("CONTRA", "considerações finais")]).infer_feito(), Some((2, 0, 1)));
+        assert_eq!(old(&[framing.clone(), entry("CONTRA", "considerações finais")]).infer_feito(), Some((2, 0, 1)));
+        // eixo encerrado, no formato antigo (encerrar_eixo) e no atual (estado_eixo)
+        let check = |extra: &str| format!(r#"{{"quem":"JUIZ","titulo":"eixo 1: avaliação da rodada 2","texto":"y","avaliacao":{{"intervencao":null,"infracoes":[],"fontes_verificadas":[],{extra}}}}}"#);
+        assert_eq!(old(&[framing.clone(), check(r#""encerrar_eixo":true"#)]).infer_feito(), Some((0, CLOSED, 2)));
+        assert_eq!(old(&[framing.clone(), check(r#""estado_eixo":"impasse""#)]).infer_feito(), Some((0, CLOSED, 2)));
+        assert_eq!(old(&[framing, check(r#""estado_eixo":"em_aberto","ponto_em_disputa":"z""#)]).infer_feito(), Some((0, 2, 2)));
         let new: Record = serde_json::from_str(r#"{"tema":"x","sessoes":[null,null,"s"],"feito":[1,2,0]}"#).unwrap();
         assert!(new.resumable());
         assert_eq!(new.feito, Some((1, 2, 0)));
