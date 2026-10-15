@@ -40,6 +40,9 @@ pub struct Eixo {
 pub struct Framing {
     pub definicoes: String,
     pub onus_da_prova: String,
+    /// Onde os lados realmente divergem; os eixos saem daqui.
+    #[serde(default)]
+    pub pontos_de_discordia: Vec<String>,
     pub eixos: Vec<Eixo>,
     pub regras: String,
 }
@@ -74,6 +77,9 @@ pub struct Check {
     pub intervencao: Option<String>,
     pub infracoes: Vec<Infracao>,
     pub fontes_verificadas: Vec<Verificacao>,
+    /// Discordâncias que surgiram e não cabem na pauta; viram eixos quando o eixo atual se encerra.
+    #[serde(default)]
+    pub divergencias_novas: Vec<String>,
     /// Com o eixo em aberto: a questão que a próxima réplica deve enfrentar.
     #[serde(default)]
     pub ponto_em_disputa: Option<String>,
@@ -116,23 +122,26 @@ pub struct Verdict {
     pub infracoes_resumo: String,
 }
 
-const FRAMING_SCHEMA: &str = r#"{"type":"object","properties":{"definicoes":{"type":"string"},"onus_da_prova":{"type":"string"},"eixos":{"type":"array","minItems":1,"maxItems":6,"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}},"regras":{"type":"string"}},"required":["definicoes","onus_da_prova","eixos","regras"]}"#;
+const FRAMING_SCHEMA: &str = r#"{"type":"object","properties":{"definicoes":{"type":"string"},"onus_da_prova":{"type":"string"},"pontos_de_discordia":{"type":"array","items":{"type":"string"}},"eixos":{"type":"array","minItems":1,"maxItems":6,"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}},"regras":{"type":"string"}},"required":["definicoes","onus_da_prova","pontos_de_discordia","eixos","regras"]}"#;
 const DOSSIE_SCHEMA: &str = r#"{"type":"object","properties":{"tese":{"type":"string"},"fontes":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"url":{"type":"string"},"titulo":{"type":"string"},"trecho":{"type":"string"}},"required":["id","url","titulo","trecho"]}},"argumentos":{"type":"array","items":{"type":"string"}}},"required":["tese","fontes","argumentos"]}"#;
-const CHECK_SCHEMA: &str = r#"{"type":"object","properties":{"intervencao":{"type":["string","null"]},"infracoes":{"type":"array","items":{"type":"object","properties":{"lado":{"enum":["pro","contra"]},"tipo":{"type":"string"},"trecho":{"type":"string"},"explicacao":{"type":"string"}},"required":["lado","tipo","trecho","explicacao"]}},"fontes_verificadas":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"ok":{"type":"boolean"},"nota":{"type":"string"}},"required":["id","ok","nota"]}},"ponto_em_disputa":{"type":["string","null"]},"estado_eixo":{"enum":["em_aberto","consenso","impasse"]},"proximos_eixos":{"type":["array","null"],"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}}},"required":["intervencao","infracoes","fontes_verificadas","ponto_em_disputa","estado_eixo","proximos_eixos"]}"#;
+const CHECK_SCHEMA: &str = r#"{"type":"object","properties":{"intervencao":{"type":["string","null"]},"infracoes":{"type":"array","items":{"type":"object","properties":{"lado":{"enum":["pro","contra"]},"tipo":{"type":"string"},"trecho":{"type":"string"},"explicacao":{"type":"string"}},"required":["lado","tipo","trecho","explicacao"]}},"fontes_verificadas":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"ok":{"type":"boolean"},"nota":{"type":"string"}},"required":["id","ok","nota"]}},"divergencias_novas":{"type":"array","items":{"type":"string"}},"ponto_em_disputa":{"type":["string","null"]},"estado_eixo":{"enum":["em_aberto","consenso","impasse"]},"proximos_eixos":{"type":["array","null"],"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}}},"required":["intervencao","infracoes","fontes_verificadas","divergencias_novas","ponto_em_disputa","estado_eixo","proximos_eixos"]}"#;
 const ASK_SCHEMA: &str = r#"{"type":"object","properties":{"destino":{"enum":["juiz","pro","contra"]},"resposta":{"type":"string"}},"required":["destino","resposta"]}"#;
 const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"vencedor":{"enum":["pro","contra","empate"]},"justificativa":{"type":"string"},"eixos":{"type":"array","items":{"type":"object","properties":{"titulo":{"type":"string"},"nota_pro":{"type":"number"},"nota_contra":{"type":"number"},"comentario":{"type":"string"}},"required":["titulo","nota_pro","nota_contra","comentario"]}},"infracoes_resumo":{"type":"string"}},"required":["vencedor","justificativa","eixos","infracoes_resumo"]}"#;
 
 const JUDGE_SYSTEM: &str = "Você é o JUIZ e mediador de um debate entre dois agentes de IA: PRÓ (favorável ao tema) e CONTRA (contrário). \
 Você é neutro e fala pouco. Suas funções:
-1. Enquadrar o debate: definições, ônus da prova e os eixos, que são os subtemas que orbitam o tema principal. A quantidade depende do tema: \
-só os eixos que realmente decidem a questão (um tema simples pode ter 1 ou 2; um complexo, até 6), sem eixos redundantes ou periféricos.
+1. Enquadrar o debate: definições, ônus da prova e os eixos, que são os subtemas que orbitam o tema principal. Primeiro liste em \
+pontos_de_discordia onde PRÓ e CONTRA realmente divergem; depois junte os pontos que seriam decididos pelos mesmos argumentos. Cada eixo é uma \
+discordância real cujo resultado pode mudar o veredito, e a quantidade sai dessa análise, não de um número padrão: um tema com uma só questão \
+central tem um só eixo. Na dúvida, comece enxuto: novos eixos podem entrar durante o debate.
 2. Ao fim de cada rodada, apontar falácias (espantalho, ad hominem, falso dilema, apelo à emoção no lugar de evidência, \
 generalização apressada, cherry-picking, etc.), afirmações falsas ou sem fonte e citações distorcidas. Use WebFetch para conferir \
 por amostragem as fontes citadas que parecerem duvidosas ou decisivas (no máximo 2 por rodada). Só registre infrações reais e relevantes.
 3. Conduzir cada eixo até ele se resolver; não há número fixo de rodadas. O eixo só termina em consenso (os dois lados aceitam explicitamente \
 a mesma resposta à pergunta do eixo; concessões parciais não bastam) ou em impasse (uma rodada inteira sem argumento nem evidência nova, \
 com a discordância reduzida a uma premissa que nenhum dos dois vai abandonar). Enquanto estiver em aberto, indique o ponto em disputa que a \
-próxima réplica deve enfrentar. Ao encerrar um eixo, revise a pauta: retirar eixos que ficaram desnecessários (já cobertos ou irrelevantes) e incluir os mais importantes que surgiram no debate.
+próxima réplica deve enfrentar. Anote as divergências novas e relevantes que surgirem e não couberem na pauta. Ao encerrar um eixo, revise a pauta: \
+retire os eixos que ficaram desnecessários (já cobertos ou irrelevantes) e transforme em eixo cada divergência anotada que realmente decide a questão.
 4. Dar o veredito: quem ARGUMENTOU melhor (evidência, lógica, honestidade, resposta direta ao oponente), não quem \"tem razão\". \
 Nunca puna um lado pela posição que defende, só pela conduta argumentativa.
 Os debatedores são advogados das suas posições: defender a própria tese com firmeza é o papel deles. Conceder não é mérito em si: \
@@ -142,15 +151,18 @@ Escreva em português. Intervenções têm no máximo 2 frases, com tom de juiz 
 
 const JUDGE_SYSTEM_EN: &str = "You are the JUDGE and moderator of a debate between two AI agents: PRO (in favor of the motion) and CON (against it). \
 You are neutral and speak little. Your duties:
-1. Frame the debate: definitions, burden of proof and the issues, the subtopics that orbit the main motion. How many depends on the motion: \
-only the issues that really decide the question (a simple motion may have 1 or 2; a complex one, up to 6), no redundant or peripheral ones.
+1. Frame the debate: definitions, burden of proof and the issues, the subtopics that orbit the main motion. First list in \
+pontos_de_discordia where PRO and CON really disagree; then merge the points that would be decided by the same arguments. Each issue is a \
+real disagreement whose outcome can change the verdict, and how many there are comes from that analysis, not from a default number: a motion \
+with a single central question has a single issue. When in doubt, start lean: new issues can be added during the debate.
 2. At the end of each round, point out fallacies (straw man, ad hominem, false dilemma, appeal to emotion instead of evidence, \
 hasty generalization, cherry-picking, etc.), false or unsourced claims and distorted quotes. Use WebFetch to spot-check \
 cited sources that look dubious or decisive (at most 2 per round). Only record real, relevant infractions.
 3. Carry each issue until it is resolved; there is no fixed number of rounds. An issue only ends in consensus (both sides explicitly accept \
 the same answer to the issue's question; partial concessions are not enough) or in impasse (a whole round with no new argument or evidence, \
 with the disagreement narrowed down to a premise neither side will give up). While it is open, name the point in dispute that the next \
-rebuttal must address. When closing an issue, revise the agenda: drop issues that became unnecessary (already covered or irrelevant) and add the more important ones that came up in the debate.
+rebuttal must address. Note the new, relevant disagreements that come up and don't fit the agenda. When closing an issue, revise the agenda: \
+drop issues that became unnecessary (already covered or irrelevant) and turn each noted disagreement that really decides the question into an issue.
 4. Deliver the verdict: who ARGUED better (evidence, logic, honesty, directly answering the opponent), not who \"is right\". \
 Never penalize a side for the position it defends, only for its argumentative conduct.
 The debaters are advocates for their positions: defending their own thesis firmly is their job. Conceding is not a merit in itself: \
@@ -437,6 +449,9 @@ fn check_text(c: &Check) -> String {
     for v in &c.fontes_verificadas {
         s += &format!("\n{} [{}] {}", if v.ok { "✓" } else { "✗" }, v.id, v.nota);
     }
+    for d in &c.divergencias_novas {
+        s += &trf!("\n+ Divergência nova: {d}", "\n+ New disagreement: {d}");
+    }
     if let Some(st) = c.status() {
         s += &format!("\n{st}");
     }
@@ -597,17 +612,25 @@ only one short sentence handing over the floor."
                     String::new()
                 };
                 let rest = self.rec.enquadramento.as_ref().map(|f| f.eixos[i + 1..].iter().map(|e| e.titulo.clone()).collect::<Vec<_>>().join(" · ")).unwrap_or_default();
+                // o que o juiz anotou nas rodadas anteriores deste eixo
+                let prefix = trf!("eixo {}: ", "issue {}: ", i + 1);
+                let noted: Vec<String> = self.rec.transcricao.iter().filter(|e| e.titulo.starts_with(&prefix)).filter_map(|e| e.avaliacao.as_ref()).flat_map(|c| c.divergencias_novas.clone()).collect();
                 let instr = trf!(
                     "Fim da rodada {round} do eixo «{}». Avalie as falas desta rodada.{when}\n\
+divergencias_novas = discordâncias relevantes surgidas nesta rodada que não cabem neste eixo nem na pauta restante (lista vazia se não houver).\n\
 estado_eixo = consenso, impasse ou em_aberto. Se em_aberto, ponto_em_disputa = a questão concreta que a próxima réplica deve enfrentar; senão null.\n\
-Pauta restante: {}. Se o eixo for encerrado, proximos_eixos = a lista completa dos eixos que virão depois dele (retire os desnecessários, \
-inclua os mais importantes que surgiram; lista vazia leva às considerações finais), ou null para manter a pauta.",
+Pauta restante: {}. Divergências já anotadas neste eixo: {}. Se o eixo for encerrado, proximos_eixos = a lista completa dos eixos que virão \
+depois dele (retire os desnecessários; transforme em eixo cada divergência anotada, inclusive as de agora, que decide a questão; lista vazia leva \
+às considerações finais), ou null para manter a pauta.",
                     "End of round {round} of the issue «{}». Evaluate this round's speeches.{when}\n\
+divergencias_novas = relevant disagreements that came up this round and fit neither this issue nor the remaining agenda (empty list if none).\n\
 estado_eixo = consenso, impasse or em_aberto. If em_aberto, ponto_em_disputa = the concrete question the next rebuttal must address; otherwise null.\n\
-Remaining agenda: {}. If the issue is closed, proximos_eixos = the full list of issues to come after it (drop the unnecessary ones, \
-add the more important ones that came up; an empty list goes to closing statements), or null to keep the agenda.",
+Remaining agenda: {}. Disagreements already noted on this issue: {}. If the issue is closed, proximos_eixos = the full list of issues to come \
+after it (drop the unnecessary ones; turn each noted disagreement, including this round's, that decides the question into an issue; an empty list \
+goes to closing statements), or null to keep the agenda.",
                     eixo.titulo,
-                    if rest.is_empty() { tr!("nenhum", "none").to_string() } else { rest }
+                    if rest.is_empty() { tr!("nenhum", "none").to_string() } else { rest },
+                    if noted.is_empty() { tr!("nenhuma", "none").to_string() } else { noted.join(" · ") }
                 );
                 let mut c: Check = self.ask_json(Side::Judge, &instr, CHECK_SCHEMA).await?;
                 // o mínimo e o teto de rodadas valem mesmo se o juiz discordar
