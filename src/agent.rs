@@ -50,8 +50,8 @@ pub fn parse(line: &str) -> Vec<Parsed> {
             .flatten()
             .filter(|c| c["type"] == "tool_use")
             .filter_map(|c| match c["name"].as_str() {
-                Some("WebSearch") => Some(Parsed::Tool(format!("buscando: {}", s(&c["input"]["query"])))),
-                Some("WebFetch") => Some(Parsed::Tool(format!("lendo: {}", s(&c["input"]["url"])))),
+                Some("WebSearch") => Some(Parsed::Tool(trf!("buscando: {}", "searching: {}", s(&c["input"]["query"])))),
+                Some("WebFetch") => Some(Parsed::Tool(trf!("lendo: {}", "reading: {}", s(&c["input"]["url"])))),
                 _ => None,
             })
             .collect(),
@@ -99,7 +99,7 @@ impl Agent {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| format!("não consegui rodar o claude: {e}"))?;
+            .map_err(|e| trf!("não consegui rodar o claude: {e}", "could not run claude: {e}"))?;
 
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(prompt.as_bytes()).await.map_err(|e| e.to_string())?;
@@ -130,7 +130,7 @@ impl Agent {
             Some((false, text, _)) => Err(text),
             None => {
                 let err = err_task.await.unwrap_or_default();
-                Err(format!("claude terminou sem resposta: {}", err.trim()))
+                Err(trf!("claude terminou sem resposta: {}", "claude exited without a reply: {}", err.trim()))
             }
         }
     }

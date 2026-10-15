@@ -1,3 +1,24 @@
+/// Interface language, picked once at startup with `--lang`.
+pub static EN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn en() -> bool {
+    EN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `tr!("texto", "text")`: picks the string for the current language.
+macro_rules! tr {
+    ($pt:expr, $en:expr) => {
+        if crate::en() { $en } else { $pt }
+    };
+}
+
+/// `trf!("{n} fontes", "{n} sources")`: like `format!`, one format string per language.
+macro_rules! trf {
+    ($pt:literal, $en:literal $($args:tt)*) => {
+        if crate::en() { format!($en $($args)*) } else { format!($pt $($args)*) }
+    };
+}
+
 mod agent;
 mod debate;
 mod sprites;
@@ -60,13 +81,13 @@ impl App {
             input: String::new(),
             topic,
             tick: 0,
-            phase: "Preparando".into(),
+            phase: tr!("Preparando", "Preparing").into(),
             eixos: vec![],
             eixo: None,
             speech: Default::default(),
             tool: Default::default(),
             pose: [Pose::Idle; 3],
-            balloon: "Ordem no tribunal! O debate vai começar.".into(),
+            balloon: tr!("Ordem no tribunal! O debate vai começar.", "Order in the court! The debate is about to begin.").into(),
             judge_fresh: false,
             objection_until: 0,
             talk_until: 0,
@@ -101,7 +122,7 @@ impl App {
             Msg::Phase(p) => self.phase = p,
             Msg::Framing(f) => {
                 let list: Vec<String> = f.eixos.iter().enumerate().map(|(i, e)| format!("{}) {}", i + 1, e.titulo)).collect();
-                self.balloon = format!("Tema enquadrado! Eixos: {}", list.join(" · "));
+                self.balloon = trf!("Tema enquadrado! Eixos: {}", "Topic framed! Issues: {}", list.join(" · "));
                 self.eixos = f.eixos;
                 self.say_judge();
             }
@@ -109,7 +130,7 @@ impl App {
                 self.eixo = Some(i);
                 let e = &self.eixos[i];
                 // anexa: não apaga a objeção/avaliação que acabou de sair
-                self.balloon = format!("{}\n\n▶ Eixo {}/{}: {} — {}", self.balloon, i + 1, self.eixos.len(), e.titulo, e.pergunta);
+                self.balloon = trf!("{}\n\n▶ Eixo {}/{}: {} — {}", "{}\n\n▶ Issue {}/{}: {} — {}", self.balloon, i + 1, self.eixos.len(), e.titulo, e.pergunta);
                 self.say_judge();
             }
             Msg::Busy(s) => {
@@ -160,13 +181,13 @@ impl App {
                 let objection = !c.infracoes.is_empty() || c.fontes_verificadas.iter().any(|v| !v.ok);
                 let mut text = c.intervencao.clone().unwrap_or_default();
                 for i in &c.infracoes {
-                    text += &format!("\n⚠ {}: {} — {}", if i.lado == "pro" { "PRÓ" } else { "CONTRA" }, i.tipo, i.explicacao);
+                    text += &format!("\n⚠ {}: {} — {}", if i.lado == "pro" { Side::Pro } else { Side::Con }.name(), i.tipo, i.explicacao);
                 }
                 for v in c.fontes_verificadas.iter().filter(|v| !v.ok) {
                     text += &format!("\n✗ [{}] {}", v.id, v.nota);
                 }
                 let text = text.trim().to_string();
-                self.balloon = if text.is_empty() { "✓ Rodada limpa. Prossigam.".into() } else { text };
+                self.balloon = if text.is_empty() { tr!("✓ Rodada limpa. Prossigam.", "✓ Clean round. Carry on.").into() } else { text };
                 self.say_judge();
                 if objection {
                     self.objection_until = self.tick + 20;
@@ -175,7 +196,7 @@ impl App {
             Msg::Dossie(s, d) => {
                 self.pose[s as usize] = Pose::Idle;
                 self.tool[s as usize].clear();
-                self.speech[s as usize].push(("dossiê".into(), format!("{}\n({} fontes · tecla f)", d.tese, d.fontes.len())));
+                self.speech[s as usize].push((tr!("dossiê", "dossier").into(), trf!("{}\n({} fontes · tecla f)", "{}\n({} sources · key f)", d.tese, d.fontes.len())));
                 self.dossies[s as usize] = Some(d);
             }
             Msg::Usage(u) => self.usage = Some(u),
@@ -186,7 +207,9 @@ impl App {
                     _ => (Pose::Idle, Pose::Idle),
                 };
                 self.pose = [p, c, Pose::Idle];
-                self.balloon = format!("Veredito: {}! (tecla v)", if v.vencedor == "empate" { "EMPATE".into() } else { format!("vence o {}", if p == Pose::Win { "PRÓ" } else { "CONTRA" }) });
+                let winner = if p == Pose::Win { Side::Pro } else { Side::Con }.name();
+                let result = if v.vencedor == "empate" { tr!("EMPATE", "TIE").into() } else { trf!("vence o {winner}", "{winner} wins") };
+                self.balloon = trf!("Veredito: {result}! (tecla v)", "Verdict: {result}! (key v)");
                 self.objection_until = self.tick + 12;
                 self.verdict = Some(v);
                 self.mode = Mode::Verdict;
@@ -229,7 +252,7 @@ impl App {
                 KeyCode::Enter if !self.input.trim().is_empty() => {
                     let text = std::mem::take(&mut self.input).trim().to_string();
                     if self.mode == Mode::Ask {
-                        self.tool[2] = format!("pergunta na fila: {text}");
+                        self.tool[2] = trf!("pergunta na fila: {text}", "question queued: {text}");
                         send(Cmd::Ask(text));
                     } else {
                         self.topic = text;
@@ -287,20 +310,20 @@ async fn plain(topic: String) {
     while let Some(m) = rx.recv().await {
         match m {
             Msg::Phase(p) => println!("\n===== {p} ====="),
-            Msg::Framing(f) => println!("[JUIZ] eixos: {:?}", f.eixos.iter().map(|e| &e.titulo).collect::<Vec<_>>()),
-            Msg::Eixo(i) => println!("\n--- eixo {} ---", i + 1),
-            Msg::Busy(s) => println!("[{}] pensando…", s.name()),
+            Msg::Framing(f) => println!("[{}] {}: {:?}", Side::Judge.name(), tr!("eixos", "issues"), f.eixos.iter().map(|e| &e.titulo).collect::<Vec<_>>()),
+            Msg::Eixo(i) => println!("\n--- {} {} ---", tr!("eixo", "issue"), i + 1),
+            Msg::Busy(s) => println!("[{}] {}", s.name(), tr!("pensando…", "thinking…")),
             Msg::Start(s, t) => print!("\n[{} · {t}] ", s.name()),
             Msg::Token(_, t) => print!("{t}"),
             Msg::Tool(s, t) => println!("  [{}] {t}", s.name()),
             Msg::Said(..) => println!(),
-            Msg::Judge(t) => println!("[JUIZ] {t}"),
-            Msg::Check(c) => println!("[JUIZ] {c:?}"),
-            Msg::Dossie(s, d) => println!("[{}] dossiê: {} ({} fontes)", s.name(), d.tese, d.fontes.len()),
-            Msg::Usage(u) => println!("  (uso 5h: {:.0}%)", u * 100.0),
-            Msg::Verdict(v) => println!("\n[VEREDITO] {v:#?}"),
-            Msg::Error(e) => println!("\n[ERRO] {e}"),
-            Msg::Saved(p) => println!("salvando em {}", p.display()),
+            Msg::Judge(t) => println!("[{}] {t}", Side::Judge.name()),
+            Msg::Check(c) => println!("[{}] {c:?}", Side::Judge.name()),
+            Msg::Dossie(s, d) => println!("{}", trf!("[{}] dossiê: {} ({} fontes)", "[{}] dossier: {} ({} sources)", s.name(), d.tese, d.fontes.len())),
+            Msg::Usage(u) => println!("{}", trf!("  (uso 5h: {:.0}%)", "  (5h usage: {:.0}%)", u * 100.0)),
+            Msg::Verdict(v) => println!("\n[{}] {v:#?}", tr!("VEREDITO", "VERDICT")),
+            Msg::Error(e) => println!("\n[{}] {e}", tr!("ERRO", "ERROR")),
+            Msg::Saved(p) => println!("{}", trf!("salvando em {}", "saving to {}", p.display())),
             Msg::Waiting => {}
         }
         let _ = out.flush();
@@ -309,9 +332,23 @@ async fn plain(topic: String) {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let is_plain = args.iter().any(|a| a == "--plain");
-    let topic = args.iter().filter(|a| *a != "--plain").cloned().collect::<Vec<_>>().join(" ");
+    let (mut is_plain, mut words) = (false, vec![]);
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--plain" => is_plain = true,
+            "--lang" => match args.next().as_deref() {
+                Some("pt") => {}
+                Some("en") => EN.store(true, std::sync::atomic::Ordering::Relaxed),
+                _ => {
+                    eprintln!("usage: gavel [--lang pt|en] [--plain] [topic]");
+                    std::process::exit(2);
+                }
+            },
+            _ => words.push(a),
+        }
+    }
+    let topic = words.join(" ");
     if is_plain {
         plain(topic).await;
         return Ok(());
@@ -353,7 +390,7 @@ async fn main() -> std::io::Result<()> {
     }
     ratatui::restore();
     if let Some(p) = &app.saved {
-        println!("Debate salvo em {}", p.display());
+        println!("{}", trf!("Debate salvo em {}", "Debate saved to {}", p.display()));
     }
     Ok(())
 }

@@ -1,19 +1,20 @@
 # ⚖ gavel
 
-Debate entre agentes Claude no terminal. Você escolhe o tema; o **PRÓ** e o **CONTRA** (Sonnet) pesquisam na web
-e debatem citando fontes; o **JUIZ** (Opus) define os eixos, aponta falácias, confere fontes e dá o veredito.
+Debates between Claude agents in the terminal. You pick the topic; **PRO** and **CON** (Sonnet) research the web
+and debate citing sources; the **JUDGE** (Opus) sets the issues, flags fallacies, checks sources and delivers the verdict.
 
-Usa o seu login do Claude Code (assinatura): cada agente é um `claude -p` isolado, com sessão própria.
+Uses your Claude Code login (subscription): each agent is an isolated `claude -p` with its own session.
 
 ```sh
-cargo run --release -- "pizza com abacaxi deveria ser aceita?"   # ou sem tema para digitar na tela
-cargo run --release -- --plain "tema"                            # sem TUI, imprime no stdout
+cargo run --release -- "should pineapple on pizza be accepted?"   # or no topic to type it on screen
+cargo run --release -- --plain "topic"                            # no TUI, prints to stdout
+cargo run --release -- --lang en "topic"                          # interface and agents in English (default: pt)
 ```
 
-Teclas: `espaço` alterna automático / passo a passo (no passo a passo, `Enter` libera o próximo turno) ·
-`p` pergunta ao juiz (ele responde ou passa a palavra a um dos lados) · `f` fontes (`←→` troca o lado) · `v` veredito ·
-`tab` troca o painel · `↑↓ PgUp PgDn End` rola · `q` sai.
+Keys: `space` toggles automatic / step by step (in step by step, `Enter` releases the next turn) ·
+`p` question for the judge (it answers or hands the floor to one side) · `f` sources (`←→` switches side) · `v` verdict ·
+`tab` switches panel · `↑↓ PgUp PgDn End` scroll · `q` quits.
 
-Debates ficam em `~/.local/share/gavel/debates/` (`.json` e `.md`), salvos a cada turno.
+Debates are saved to `~/.local/share/gavel/debates/` (`.json` and `.md`) after every turn.
 
-Testar sem gastar limite: `GAVEL_CLAUDE_BIN=$PWD/tests/fake-claude.sh cargo run -- "tema"`.
+Test without spending usage: `GAVEL_CLAUDE_BIN=$PWD/tests/fake-claude.sh cargo run -- "topic"`.

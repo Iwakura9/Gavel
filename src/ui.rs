@@ -66,7 +66,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     // título
     let mut t = vec![" ⚖ GAVEL ".bold().fg(Color::Black).bg(GOLD), format!(" «{}» ", app.topic).bold()];
     if let Some(i) = app.eixo {
-        t.push(format!(" eixo {}/{}: {}", i + 1, app.eixos.len(), app.eixos[i].titulo).fg(GOLD));
+        t.push(trf!(" eixo {}/{}: {}", " issue {}/{}: {}", i + 1, app.eixos.len(), app.eixos[i].titulo).fg(GOLD));
     }
     f.render_widget(Line::from(t), title);
 
@@ -79,9 +79,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(if objection { RED } else { GOLD }))
-        .title(if objection { " ⚖ OBJEÇÃO! ".bold().fg(RED) } else { " ⚖ Juiz · Opus ".bold().fg(GOLD) });
+        .title(if objection { tr!(" ⚖ OBJEÇÃO! ", " ⚖ OBJECTION! ").bold().fg(RED) } else { tr!(" ⚖ Juiz · Opus ", " ⚖ Judge · Opus ").bold().fg(GOLD) });
     if app.pose[2] == Pose::Thinking {
-        block = block.title_bottom(" deliberando… ".italic().fg(DIM));
+        block = block.title_bottom(tr!(" deliberando… ", " deliberating… ").italic().fg(DIM));
     } else if !app.tool[2].is_empty() {
         block = block.title_bottom(format!(" 🔎 {} ", app.tool[2]).italic().fg(DIM));
     }
@@ -108,25 +108,25 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn debater(f: &mut Frame, app: &App, side: Side, area: Rect) {
     let i = side as usize;
     let c = color(i);
-    let (label, align) = if side == Side::Pro { (" A FAVOR · Sonnet ", Alignment::Left) } else { (" CONTRA · Sonnet ", Alignment::Right) };
+    let (label, align) = if side == Side::Pro { (tr!(" A FAVOR · Sonnet ", " PRO · Sonnet "), Alignment::Left) } else { (tr!(" CONTRA · Sonnet ", " CON · Sonnet "), Alignment::Right) };
     let mut block = Block::bordered()
         .border_type(if app.focus == i { BorderType::Thick } else { BorderType::Rounded })
         .border_style(Style::new().fg(c))
         .title(Line::from(label.bold().fg(c)).alignment(align));
     if app.back[i] > 0 {
-        block = block.title_bottom(Line::from(format!(" ↑{} (End volta) ", app.back[i]).fg(DIM)).alignment(align));
+        block = block.title_bottom(Line::from(trf!(" ↑{} (End volta) ", " ↑{} (End returns) ", app.back[i]).fg(DIM)).alignment(align));
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let pose = app.pose[i];
     let state = match pose {
-        Pose::Thinking => "pensando…",
-        Pose::Talking => "falando",
-        Pose::Searching => "pesquisando",
-        Pose::Win => "🏆 venceu!",
-        Pose::Lose => "perdeu… mas com dignidade",
-        _ => "aguardando",
+        Pose::Thinking => tr!("pensando…", "thinking…"),
+        Pose::Talking => tr!("falando", "speaking"),
+        Pose::Searching => tr!("pesquisando", "researching"),
+        Pose::Win => tr!("🏆 venceu!", "🏆 won!"),
+        Pose::Lose => tr!("perdeu… mas com dignidade", "lost… but with dignity"),
+        _ => tr!("aguardando", "waiting"),
     };
     let mut info = vec![Line::from(side.name().bold().fg(c)), Line::from(state.italic())];
     if !app.tool[i].is_empty() {
@@ -164,7 +164,7 @@ fn debater(f: &mut Frame, app: &App, side: Side, area: Rect) {
 fn status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut s = vec![format!(" {} ", app.phase).bold()];
     if app.waiting {
-        s.push(" ⏎ ENTER: próximo turno ".bold().fg(Color::Black).bg(GOLD));
+        s.push(tr!(" ⏎ ENTER: próximo turno ", " ⏎ ENTER: next turn ").bold().fg(Color::Black).bg(GOLD));
     } else if app.manual {
         s.push(" ✋ MANUAL ".bold().fg(GOLD));
     }
@@ -182,9 +182,9 @@ fn status_bar(f: &mut Frame, app: &App, area: Rect) {
     s.push(format!("P:{} ", app.infr[0]).fg(GREEN));
     s.push(format!("C:{} ", app.infr[1]).fg(RED));
     if let Some(u) = app.usage {
-        s.push(format!("· uso 5h {:.0}% ", u * 100.0).fg(DIM));
+        s.push(trf!("· uso 5h {:.0}% ", "· 5h usage {:.0}% ", u * 100.0).fg(DIM));
     }
-    s.push(format!("· ␣ {}  p pergunta  f fontes  v veredito  q sai", if app.manual { "automático" } else { "passo a passo" }).fg(DIM));
+    s.push(trf!("· ␣ {}  p pergunta  f fontes  v veredito  q sai", "· ␣ {}  p question  f sources  v verdict  q quit", if app.manual { tr!("automático", "automatic") } else { tr!("passo a passo", "step by step") }).fg(DIM));
     f.render_widget(Line::from(s), area);
 }
 
@@ -198,11 +198,11 @@ fn popup(f: &mut Frame, area: Rect, title: Line<'static>, color: Color) -> Rect 
 
 fn ask_popup(f: &mut Frame, app: &App) {
     let area = center(f.area(), 70, 6);
-    let inner = popup(f, area, Line::from(" ⚖ Pergunta para o juiz ".bold().fg(GOLD)), GOLD);
+    let inner = popup(f, area, Line::from(tr!(" ⚖ Pergunta para o juiz ", " ⚖ Question for the judge ").bold().fg(GOLD)), GOLD);
     let lines = vec![
         Line::from(vec!["› ".fg(GOLD), app.input.clone().into(), "▏".fg(GOLD)]),
         Line::raw(""),
-        Line::from("Enter envia · Esc cancela. O juiz responde ou passa a palavra a um dos lados, após o turno atual.".fg(DIM)),
+        Line::from(tr!("Enter envia · Esc cancela. O juiz responde ou passa a palavra a um dos lados, após o turno atual.", "Enter sends · Esc cancels. The judge answers or hands the floor to one side, after the current turn.").fg(DIM)),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -242,10 +242,10 @@ fn sources_popup(f: &mut Frame, app: &App) {
         let label = format!(" {} · {n} ", [Side::Pro, Side::Con][k].name());
         if k == i { label.bold().fg(Color::Black).bg(color(k)) } else { label.fg(color(k)) }
     };
-    let title = Line::from(vec![" 📚 FONTES  ".bold().fg(GOLD), tab(0), " ".into(), tab(1), " ".into()]);
+    let title = Line::from(vec![tr!(" 📚 FONTES  ", " 📚 SOURCES  ").bold().fg(GOLD), tab(0), " ".into(), tab(1), " ".into()]);
     let inner = popup(f, f.area(), title, c);
     let [body, _, hint] = Layout::vertical([Min(1), Length(1), Length(1)]).areas(inner);
-    f.render_widget(Line::from("←→ troca o lado · ↑↓ PgUp PgDn Home End rola · Esc fecha".fg(DIM)).centered(), hint);
+    f.render_widget(Line::from(tr!("←→ troca o lado · ↑↓ PgUp PgDn Home End rola · Esc fecha", "←→ switch side · ↑↓ PgUp PgDn Home End scroll · Esc closes").fg(DIM)).centered(), hint);
     let [text, _, bar] = Layout::horizontal([Min(1), Length(1), Length(1)]).areas(body.inner(Margin::new(1, 0)));
 
     const IND: usize = 6;
@@ -253,26 +253,26 @@ fn sources_popup(f: &mut Frame, app: &App) {
     let pad = || Span::raw(" ".repeat(IND));
     let mut lines: Vec<Line> = vec![];
     match &app.dossies[i] {
-        None => lines.push(Line::from("(ainda pesquisando…)".italic().fg(DIM))),
+        None => lines.push(Line::from(tr!("(ainda pesquisando…)", "(still researching…)").italic().fg(DIM))),
         Some(d) => {
-            for (k, l) in wrap(&d.tese, w - 6).into_iter().enumerate() {
-                lines.push(Line::from(vec![if k == 0 { "Tese: ".bold().fg(c) } else { "      ".into() }, l.bold()]));
+            for (k, l) in wrap(&d.tese, w - tr!(6, 8)).into_iter().enumerate() {
+                lines.push(Line::from(vec![if k == 0 { tr!("Tese: ", "Thesis: ").bold().fg(c) } else { tr!("      ", "        ").into() }, l.bold()]));
             }
             let st = |id: &String| app.checks.get(id).map(|(ok, _)| *ok);
             let ok = d.fontes.iter().filter(|s| st(&s.id) == Some(true)).count();
             let bad = d.fontes.iter().filter(|s| st(&s.id) == Some(false)).count();
             lines.push(Line::from(vec![
-                format!("✓ conferidas: {ok}").fg(GREEN),
+                trf!("✓ conferidas: {ok}", "✓ verified: {ok}").fg(GREEN),
                 "  ·  ".fg(DIM),
-                format!("✗ não conferem: {bad}").fg(RED),
+                trf!("✗ não conferem: {bad}", "✗ don't hold up: {bad}").fg(RED),
                 "  ·  ".fg(DIM),
-                format!("não verificadas: {}", d.fontes.len() - ok - bad).fg(DIM),
+                trf!("não verificadas: {}", "unchecked: {}", d.fontes.len() - ok - bad).fg(DIM),
             ]));
             for s in &d.fontes {
                 lines.push(Line::raw(""));
                 let (bg, verdict) = match app.checks.get(&s.id) {
-                    Some((true, nota)) => (GREEN, Some(("✓ juiz: ", nota))),
-                    Some((false, nota)) => (RED, Some(("✗ juiz: ", nota))),
+                    Some((true, nota)) => (GREEN, Some((tr!("✓ juiz: ", "✓ judge: "), nota))),
+                    Some((false, nota)) => (RED, Some((tr!("✗ juiz: ", "✗ judge: "), nota))),
                     None => (DIM, None),
                 };
                 let badge = format!(" {} ", s.id);
@@ -298,7 +298,7 @@ fn sources_popup(f: &mut Frame, app: &App) {
                 }
                 let cited: usize = app.speech[i].iter().map(|(_, t)| t.matches(&format!("[{}]", s.id)).count()).sum();
                 if cited > 0 {
-                    lines.push(Line::from(vec![pad(), format!("citada {cited}× no debate").fg(DIM)]));
+                    lines.push(Line::from(vec![pad(), trf!("citada {cited}× no debate", "cited {cited}× in the debate").fg(DIM)]));
                 }
             }
         }
@@ -317,31 +317,31 @@ fn verdict_popup(f: &mut Frame, app: &App) {
     let Some(v) = &app.verdict else { return };
     let a = f.area();
     let area = center(a, 90, a.height.saturating_sub(4));
-    let inner = popup(f, area, Line::from(" ⚖ VEREDITO · Esc fecha ".bold().fg(GOLD)), GOLD);
+    let inner = popup(f, area, Line::from(tr!(" ⚖ VEREDITO · Esc fecha ", " ⚖ VERDICT · Esc closes ").bold().fg(GOLD)), GOLD);
     let (who, c) = match v.vencedor.as_str() {
-        "pro" => ("🏆 VENCE O PRÓ", GREEN),
-        "contra" => ("🏆 VENCE O CONTRA", RED),
-        _ => ("🤝 EMPATE", GOLD),
+        "pro" => (tr!("🏆 VENCE O PRÓ", "🏆 PRO WINS"), GREEN),
+        "contra" => (tr!("🏆 VENCE O CONTRA", "🏆 CON WINS"), RED),
+        _ => (tr!("🤝 EMPATE", "🤝 TIE"), GOLD),
     };
     let mut lines = vec![Line::from(who.bold().fg(c)).centered(), Line::raw("")];
     let (tp, tc): (f64, f64) = v.eixos.iter().fold((0.0, 0.0), |(p, c), e| (p + e.nota_pro, c + e.nota_contra));
     for e in &v.eixos {
         lines.push(Line::from(vec![
             format!("{}  ", e.titulo).bold(),
-            format!("PRÓ {:.1}", e.nota_pro).fg(GREEN),
+            format!("{} {:.1}", Side::Pro.name(), e.nota_pro).fg(GREEN),
             "  ·  ".into(),
-            format!("CONTRA {:.1}", e.nota_contra).fg(RED),
+            format!("{} {:.1}", Side::Con.name(), e.nota_contra).fg(RED),
         ]));
         lines.push(Line::from(e.comentario.clone().fg(DIM)));
     }
-    lines.push(Line::from(vec!["Total  ".bold(), format!("PRÓ {tp:.1}").fg(GREEN).bold(), "  ·  ".into(), format!("CONTRA {tc:.1}").fg(RED).bold()]));
+    lines.push(Line::from(vec!["Total  ".bold(), format!("{} {tp:.1}", Side::Pro.name()).fg(GREEN).bold(), "  ·  ".into(), format!("{} {tc:.1}", Side::Con.name()).fg(RED).bold()]));
     lines.push(Line::raw(""));
     lines.push(Line::from(v.justificativa.clone()));
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec!["Infrações: ".bold().fg(RED), v.infracoes_resumo.clone().into()]));
+    lines.push(Line::from(vec![tr!("Infrações: ", "Infractions: ").bold().fg(RED), v.infracoes_resumo.clone().into()]));
     if let Some(p) = &app.saved {
         lines.push(Line::raw(""));
-        lines.push(Line::from(format!("Salvo em {}", p.display()).fg(DIM)));
+        lines.push(Line::from(trf!("Salvo em {}", "Saved to {}", p.display()).fg(DIM)));
     }
     let p = Paragraph::new(lines).wrap(Wrap { trim: true });
     let max = (p.line_count(inner.width) as u16).saturating_sub(inner.height);
@@ -358,9 +358,9 @@ fn topic_screen(f: &mut Frame, app: &App) {
     for (side, col) in [Side::Pro, Side::Judge, Side::Con].into_iter().zip(cols) {
         sprite(f, col, side, if side == Side::Judge { Pose::Idle } else { Pose::Thinking }, app.tick);
     }
-    f.render_widget(Line::from("Qual o tema do debate?".bold()).centered(), label);
+    f.render_widget(Line::from(tr!("Qual o tema do debate?", "What is the debate topic?").bold()).centered(), label);
     f.render_widget(Line::from(vec!["› ".fg(GOLD), app.input.clone().into(), "▏".fg(GOLD)]), input);
-    f.render_widget(Line::from("Enter começa · Esc sai".fg(DIM)).centered(), hint);
+    f.render_widget(Line::from(tr!("Enter começa · Esc sai", "Enter starts · Esc quits").fg(DIM)).centered(), hint);
 }
 
 #[cfg(test)]
