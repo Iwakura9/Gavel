@@ -2,10 +2,10 @@ use crate::debate::Side;
 use crate::sprites::{self, Pose, ROWS, W};
 use crate::{App, Mode};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint::*, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint::*, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 use std::collections::HashMap;
 
 const GOLD: Color = Color::Rgb(230, 180, 60);
@@ -98,7 +98,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     status_bar(f, app, status);
 
     match app.mode {
-        Mode::Ask(side) => ask_popup(f, app, side),
+        Mode::Ask => ask_popup(f, app),
         Mode::Sources => sources_popup(f, app),
         Mode::Verdict => verdict_popup(f, app),
         _ => {}
@@ -163,8 +163,10 @@ fn debater(f: &mut Frame, app: &App, side: Side, area: Rect) {
 
 fn status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mut s = vec![format!(" {} ", app.phase).bold()];
-    if app.paused {
-        s.push(" ⏸ PAUSADO ".bold().fg(Color::Black).bg(GOLD));
+    if app.waiting {
+        s.push(" ⏎ ENTER: próximo turno ".bold().fg(Color::Black).bg(GOLD));
+    } else if app.manual {
+        s.push(" ✋ MANUAL ".bold().fg(GOLD));
     }
     if !app.eixos.is_empty() {
         let dots: String = (0..app.eixos.len())
@@ -182,7 +184,7 @@ fn status_bar(f: &mut Frame, app: &App, area: Rect) {
     if let Some(u) = app.usage {
         s.push(format!("· uso 5h {:.0}% ", u * 100.0).fg(DIM));
     }
-    s.push("· ␣ pausa  p/c/j pergunta  f fontes  v veredito  q sai".fg(DIM));
+    s.push(format!("· ␣ {}  p pergunta  f fontes  v veredito  q sai", if app.manual { "automático" } else { "passo a passo" }).fg(DIM));
     f.render_widget(Line::from(s), area);
 }
 
@@ -194,45 +196,120 @@ fn popup(f: &mut Frame, area: Rect, title: Line<'static>, color: Color) -> Rect 
     inner
 }
 
-fn ask_popup(f: &mut Frame, app: &App, side: Side) {
-    let area = center(f.area(), 70, 5);
-    let title = Line::from(format!(" Pergunta da plateia para o {} ", side.name()).bold());
-    let inner = popup(f, area, title, color(side as usize));
+fn ask_popup(f: &mut Frame, app: &App) {
+    let area = center(f.area(), 70, 6);
+    let inner = popup(f, area, Line::from(" ⚖ Pergunta para o juiz ".bold().fg(GOLD)), GOLD);
     let lines = vec![
-        Line::from(vec![app.input.clone().into(), "▏".fg(GOLD)]),
-        Line::from("Enter envia (respondida após o turno atual) · Esc cancela".fg(DIM)),
+        Line::from(vec!["› ".fg(GOLD), app.input.clone().into(), "▏".fg(GOLD)]),
+        Line::raw(""),
+        Line::from("Enter envia · Esc cancela. O juiz responde ou passa a palavra a um dos lados, após o turno atual.".fg(DIM)),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+/// Quebra `text` em linhas de até `w` caracteres; palavras maiores (URLs) são cortadas.
+fn wrap(text: &str, w: usize) -> Vec<String> {
+    let w = w.max(1);
+    let (mut out, mut cur) = (vec![], String::new());
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        let n = cur.chars().count();
+        if n > 0 && n + 1 + word.len() <= w {
+            cur.push(' ');
+            cur.extend(word);
+            continue;
+        }
+        if n > 0 {
+            out.push(std::mem::take(&mut cur));
+        }
+        while word.len() > w {
+            out.push(word.drain(..w).collect());
+        }
+        cur = word.into_iter().collect();
+    }
+    if !cur.is_empty() || out.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Tela cheia, um lado por vez (←→ troca): cada fonte é um cartão com selo de status, título, URL, trecho e nota do juiz.
 fn sources_popup(f: &mut Frame, app: &App) {
-    let a = f.area();
-    let area = center(a, a.width.saturating_sub(4), a.height.saturating_sub(2));
-    let inner = popup(f, area, Line::from(" 📚 Fontes · ✓ conferida pelo juiz · ✗ não confere · Esc fecha ".bold()), GOLD);
-    let cols: [Rect; 2] = Layout::horizontal([Fill(1), Fill(1)]).spacing(2).areas(inner);
-    for (i, col) in cols.into_iter().enumerate() {
-        let mut lines = vec![Line::from([Side::Pro, Side::Con][i].name().bold().fg(color(i)))];
-        match &app.dossies[i] {
-            None => lines.push(Line::from("(ainda pesquisando…)".italic().fg(DIM))),
-            Some(d) => {
-                lines.push(Line::from(d.tese.clone().italic()));
-                for s in &d.fontes {
-                    let mark = match app.checks.get(&s.id) {
-                        Some((true, _)) => "✓ ".fg(GREEN),
-                        Some((false, _)) => "✗ ".fg(RED),
-                        None => "  ".into(),
-                    };
-                    lines.push(Line::raw(""));
-                    lines.push(Line::from(vec![mark, format!("[{}] ", s.id).bold().fg(Color::Cyan), s.titulo.clone().bold()]));
-                    lines.push(Line::from(s.url.clone().fg(DIM).underlined()));
-                    lines.push(Line::from(format!("«{}»", s.trecho)));
-                    if let Some((_, nota)) = app.checks.get(&s.id) {
-                        lines.push(Line::from(format!("juiz: {nota}").italic().fg(GOLD)));
+    let i = app.focus;
+    let c = color(i);
+    let tab = |k: usize| {
+        let n = app.dossies[k].as_ref().map_or(0, |d| d.fontes.len());
+        let label = format!(" {} · {n} ", [Side::Pro, Side::Con][k].name());
+        if k == i { label.bold().fg(Color::Black).bg(color(k)) } else { label.fg(color(k)) }
+    };
+    let title = Line::from(vec![" 📚 FONTES  ".bold().fg(GOLD), tab(0), " ".into(), tab(1), " ".into()]);
+    let inner = popup(f, f.area(), title, c);
+    let [body, _, hint] = Layout::vertical([Min(1), Length(1), Length(1)]).areas(inner);
+    f.render_widget(Line::from("←→ troca o lado · ↑↓ PgUp PgDn Home End rola · Esc fecha".fg(DIM)).centered(), hint);
+    let [text, _, bar] = Layout::horizontal([Min(1), Length(1), Length(1)]).areas(body.inner(Margin::new(1, 0)));
+
+    const IND: usize = 6;
+    let w = (text.width as usize).max(IND + 10); // evita underflow em terminal minúsculo
+    let pad = || Span::raw(" ".repeat(IND));
+    let mut lines: Vec<Line> = vec![];
+    match &app.dossies[i] {
+        None => lines.push(Line::from("(ainda pesquisando…)".italic().fg(DIM))),
+        Some(d) => {
+            for (k, l) in wrap(&d.tese, w - 6).into_iter().enumerate() {
+                lines.push(Line::from(vec![if k == 0 { "Tese: ".bold().fg(c) } else { "      ".into() }, l.bold()]));
+            }
+            let st = |id: &String| app.checks.get(id).map(|(ok, _)| *ok);
+            let ok = d.fontes.iter().filter(|s| st(&s.id) == Some(true)).count();
+            let bad = d.fontes.iter().filter(|s| st(&s.id) == Some(false)).count();
+            lines.push(Line::from(vec![
+                format!("✓ conferidas: {ok}").fg(GREEN),
+                "  ·  ".fg(DIM),
+                format!("✗ não conferem: {bad}").fg(RED),
+                "  ·  ".fg(DIM),
+                format!("não verificadas: {}", d.fontes.len() - ok - bad).fg(DIM),
+            ]));
+            for s in &d.fontes {
+                lines.push(Line::raw(""));
+                let (bg, verdict) = match app.checks.get(&s.id) {
+                    Some((true, nota)) => (GREEN, Some(("✓ juiz: ", nota))),
+                    Some((false, nota)) => (RED, Some(("✗ juiz: ", nota))),
+                    None => (DIM, None),
+                };
+                let badge = format!(" {} ", s.id);
+                let gap = " ".repeat(IND.saturating_sub(badge.chars().count()).max(1));
+                for (k, l) in wrap(&s.titulo, w - IND).into_iter().enumerate() {
+                    lines.push(if k == 0 {
+                        Line::from(vec![badge.clone().bold().fg(Color::Black).bg(bg), gap.clone().into(), l.bold()])
+                    } else {
+                        Line::from(vec![pad(), l.bold()])
+                    });
+                }
+                for l in wrap(&s.url, w - IND) {
+                    lines.push(Line::from(vec![pad(), l.fg(Color::Cyan).add_modifier(Modifier::DIM)]));
+                }
+                for l in wrap(&s.trecho, w - IND - 2) {
+                    lines.push(Line::from(vec![pad(), "│ ".fg(c), l.into()]));
+                }
+                if let Some((mark, nota)) = verdict {
+                    for (k, l) in wrap(nota, w - IND - mark.chars().count()).into_iter().enumerate() {
+                        let head = if k == 0 { mark.to_string() } else { " ".repeat(mark.chars().count()) };
+                        lines.push(Line::from(vec![pad(), head.fg(bg), l.italic().fg(GOLD)]));
                     }
+                }
+                let cited: usize = app.speech[i].iter().map(|(_, t)| t.matches(&format!("[{}]", s.id)).count()).sum();
+                if cited > 0 {
+                    lines.push(Line::from(vec![pad(), format!("citada {cited}× no debate").fg(DIM)]));
                 }
             }
         }
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).scroll((app.popup_scroll, 0)), col);
+    }
+    let max = (lines.len() as u16).saturating_sub(text.height);
+    app.popup_max.set(max);
+    let scroll = app.popup_scroll.min(max);
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), text);
+    if max > 0 {
+        let mut state = ScrollbarState::new(max as usize).position(scroll as usize);
+        f.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight).begin_symbol(None).end_symbol(None).thumb_style(Style::new().fg(c)), bar, &mut state);
     }
 }
 
@@ -266,7 +343,10 @@ fn verdict_popup(f: &mut Frame, app: &App) {
         lines.push(Line::raw(""));
         lines.push(Line::from(format!("Salvo em {}", p.display()).fg(DIM)));
     }
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }).scroll((app.popup_scroll, 0)), inner);
+    let p = Paragraph::new(lines).wrap(Wrap { trim: true });
+    let max = (p.line_count(inner.width) as u16).saturating_sub(inner.height);
+    app.popup_max.set(max);
+    f.render_widget(p.scroll((app.popup_scroll.min(max), 0)), inner);
 }
 
 fn topic_screen(f: &mut Frame, app: &App) {
@@ -281,4 +361,14 @@ fn topic_screen(f: &mut Frame, app: &App) {
     f.render_widget(Line::from("Qual o tema do debate?".bold()).centered(), label);
     f.render_widget(Line::from(vec!["› ".fg(GOLD), app.input.clone().into(), "▏".fg(GOLD)]), input);
     f.render_widget(Line::from("Enter começa · Esc sai".fg(DIM)).centered(), hint);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn wrap_respects_width() {
+        assert_eq!(super::wrap("a bb ccc dddd", 6), ["a bb", "ccc", "dddd"]);
+        assert_eq!(super::wrap("https://exemplo.org/x", 8), ["https://", "exemplo.", "org/x"]);
+        assert_eq!(super::wrap("", 5), [""]);
+    }
 }

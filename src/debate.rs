@@ -87,6 +87,7 @@ pub struct Verdict {
 const FRAMING_SCHEMA: &str = r#"{"type":"object","properties":{"definicoes":{"type":"string"},"onus_da_prova":{"type":"string"},"eixos":{"type":"array","minItems":3,"maxItems":5,"items":{"type":"object","properties":{"titulo":{"type":"string"},"pergunta":{"type":"string"}},"required":["titulo","pergunta"]}},"regras":{"type":"string"}},"required":["definicoes","onus_da_prova","eixos","regras"]}"#;
 const DOSSIE_SCHEMA: &str = r#"{"type":"object","properties":{"tese":{"type":"string"},"fontes":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"url":{"type":"string"},"titulo":{"type":"string"},"trecho":{"type":"string"}},"required":["id","url","titulo","trecho"]}},"argumentos":{"type":"array","items":{"type":"string"}}},"required":["tese","fontes","argumentos"]}"#;
 const CHECK_SCHEMA: &str = r#"{"type":"object","properties":{"intervencao":{"type":["string","null"]},"infracoes":{"type":"array","items":{"type":"object","properties":{"lado":{"enum":["pro","contra"]},"tipo":{"type":"string"},"trecho":{"type":"string"},"explicacao":{"type":"string"}},"required":["lado","tipo","trecho","explicacao"]}},"fontes_verificadas":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"ok":{"type":"boolean"},"nota":{"type":"string"}},"required":["id","ok","nota"]}},"encerrar_eixo":{"type":"boolean"}},"required":["intervencao","infracoes","fontes_verificadas","encerrar_eixo"]}"#;
+const ASK_SCHEMA: &str = r#"{"type":"object","properties":{"destino":{"enum":["juiz","pro","contra"]},"resposta":{"type":"string"}},"required":["destino","resposta"]}"#;
 const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"vencedor":{"enum":["pro","contra","empate"]},"justificativa":{"type":"string"},"eixos":{"type":"array","items":{"type":"object","properties":{"titulo":{"type":"string"},"nota_pro":{"type":"number"},"nota_contra":{"type":"number"},"comentario":{"type":"string"}},"required":["titulo","nota_pro","nota_contra","comentario"]}},"infracoes_resumo":{"type":"string"}},"required":["vencedor","justificativa","eixos","infracoes_resumo"]}"#;
 
 const JUDGE_SYSTEM: &str = "Você é o JUIZ e mediador de um debate entre dois agentes de IA: PRÓ (favorável ao tema) e CONTRA (contrário). \
@@ -132,12 +133,15 @@ pub enum Msg {
     Verdict(Verdict),
     Error(String),
     Saved(PathBuf),
+    /// Modo manual: o debate parou e espera o próximo passo.
+    Waiting,
 }
 
 /// UI → orquestrador (aplicado entre turnos).
 pub enum Cmd {
-    Pause(bool),
-    Ask(Side, String),
+    Manual(bool),
+    Next,
+    Ask(String),
 }
 
 #[derive(Serialize, Default)]
@@ -170,7 +174,8 @@ struct Debate {
     inbox: [Vec<String>; 3],
     tx: UnboundedSender<Msg>,
     rx: UnboundedReceiver<Cmd>,
-    paused: bool,
+    manual: bool,
+    step: bool,
     rec: Record,
     path: PathBuf,
 }
@@ -187,7 +192,8 @@ pub async fn run(topic: String, tx: UnboundedSender<Msg>, rx: UnboundedReceiver<
         inbox: Default::default(),
         tx,
         rx,
-        paused: false,
+        manual: false,
+        step: false,
         rec: Record { tema: topic, ..Default::default() },
         path,
     };
@@ -276,15 +282,16 @@ impl Debate {
         Ok(())
     }
 
-    /// Entre turnos: atende perguntas da plateia e segura enquanto estiver pausado.
+    /// Entre turnos: atende perguntas da plateia e, no modo manual, espera o próximo passo.
     async fn checkpoint(&mut self) -> Result<(), String> {
         loop {
             while let Ok(cmd) = self.rx.try_recv() {
                 self.handle(cmd).await?;
             }
-            if !self.paused {
+            if !self.manual || std::mem::take(&mut self.step) {
                 return Ok(());
             }
+            self.send(Msg::Waiting);
             match self.rx.recv().await {
                 Some(cmd) => self.handle(cmd).await?,
                 None => return Ok(()),
@@ -294,16 +301,28 @@ impl Debate {
 
     async fn handle(&mut self, cmd: Cmd) -> Result<(), String> {
         match cmd {
-            Cmd::Pause(p) => self.paused = p,
-            Cmd::Ask(Side::Judge, q) => {
-                self.send(Msg::Busy(Side::Judge));
-                let p = format!("PERGUNTA DA PLATEIA para o juiz: {q}\nResponda em até 3 frases, em texto corrido.");
-                let text = self.ask(Side::Judge, &p, None).await?.text;
-                self.send(Msg::Judge(text.clone()));
-                self.log("JUIZ", &format!("Pergunta da plateia: {q}"), &text);
-            }
-            Cmd::Ask(side, q) => {
-                let instr = format!("PERGUNTA DA PLATEIA para você: {q}\nResponda brevemente (até ~100 palavras) e com honestidade.");
+            Cmd::Manual(m) => self.manual = m,
+            Cmd::Next => self.step = true,
+            Cmd::Ask(q) => {
+                let instr = format!(
+                    "PERGUNTA DA PLATEIA: {q}\nSe ela cabe a você (regras, andamento, falácias, fontes, avaliação), destino = juiz e responda \
+em até 3 frases. Se for dirigida a um dos lados ou for melhor respondida por ele, destino = pro ou contra e em resposta escreva \
+só uma frase curta passando a palavra."
+                );
+                #[derive(Deserialize)]
+                struct Answer {
+                    destino: String,
+                    resposta: String,
+                }
+                let a: Answer = self.ask_json(Side::Judge, &instr, ASK_SCHEMA).await?;
+                self.send(Msg::Judge(format!("❓ «{q}»\n{}", a.resposta)));
+                self.log("JUIZ", &format!("pergunta da plateia: {q}"), &a.resposta);
+                let side = match a.destino.as_str() {
+                    "pro" => Side::Pro,
+                    "contra" => Side::Con,
+                    _ => return Ok(()),
+                };
+                let instr = format!("PERGUNTA DA PLATEIA, encaminhada a você pelo juiz: {q}\nResponda brevemente (até ~100 palavras) e com honestidade.");
                 self.speak(side, &format!("pergunta da plateia: {q}"), &instr).await?;
             }
         }

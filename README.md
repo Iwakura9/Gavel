@@ -10,7 +10,8 @@ cargo run --release -- "pizza com abacaxi deveria ser aceita?"   # ou sem tema p
 cargo run --release -- --plain "tema"                            # sem TUI, imprime no stdout
 ```
 
-Teclas: `espaço` pausa (após o turno atual) · `p`/`c`/`j` pergunta da plateia · `f` fontes · `v` veredito ·
+Teclas: `espaço` alterna automático / passo a passo (no passo a passo, `Enter` libera o próximo turno) ·
+`p` pergunta ao juiz (ele responde ou passa a palavra a um dos lados) · `f` fontes (`←→` troca o lado) · `v` veredito ·
 `tab` troca o painel · `↑↓ PgUp PgDn End` rola · `q` sai.
 
 Debates ficam em `~/.local/share/gavel/debates/` (`.json` e `.md`), salvos a cada turno.

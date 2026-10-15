@@ -6,6 +6,7 @@ mod ui;
 use debate::{Cmd, Dossie, Eixo, Msg, Side, Verdict};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use sprites::Pose;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -16,7 +17,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 pub enum Mode {
     Topic,
     Normal,
-    Ask(Side),
+    Ask,
     Sources,
     Verdict,
 }
@@ -41,10 +42,13 @@ pub struct App {
     pub dossies: [Option<Dossie>; 2],
     pub checks: HashMap<String, (bool, String)>,
     pub verdict: Option<Verdict>,
-    pub paused: bool,
+    pub manual: bool,
+    pub waiting: bool,
     pub focus: usize,
     pub back: [u16; 2],
     pub popup_scroll: u16,
+    /// Rolagem máxima do popup aberto, calculada no último desenho.
+    pub popup_max: Cell<u16>,
     pub saved: Option<PathBuf>,
     pub error: bool,
 }
@@ -71,10 +75,12 @@ impl App {
             dossies: Default::default(),
             checks: HashMap::new(),
             verdict: None,
-            paused: false,
+            manual: false,
+            waiting: false,
             focus: 0,
             back: [0; 2],
             popup_scroll: 0,
+            popup_max: Cell::new(0),
             saved: None,
             error: false,
         }
@@ -192,6 +198,7 @@ impl App {
                 self.balloon = format!("⚠ {e}");
             }
             Msg::Saved(p) => self.saved = Some(p),
+            Msg::Waiting => self.waiting = true,
         }
     }
 
@@ -212,7 +219,7 @@ impl App {
             }
         };
         match self.mode {
-            Mode::Topic | Mode::Ask(_) => match code {
+            Mode::Topic | Mode::Ask => match code {
                 KeyCode::Char(c) => self.input.push(c),
                 KeyCode::Backspace => {
                     self.input.pop();
@@ -221,9 +228,9 @@ impl App {
                 KeyCode::Esc => self.mode = Mode::Normal,
                 KeyCode::Enter if !self.input.trim().is_empty() => {
                     let text = std::mem::take(&mut self.input).trim().to_string();
-                    if let Mode::Ask(side) = self.mode {
-                        self.tool[side as usize] = format!("pergunta na fila: {text}");
-                        send(Cmd::Ask(side, text));
+                    if self.mode == Mode::Ask {
+                        self.tool[2] = format!("pergunta na fila: {text}");
+                        send(Cmd::Ask(text));
                     } else {
                         self.topic = text;
                     }
@@ -233,21 +240,29 @@ impl App {
             },
             Mode::Sources | Mode::Verdict => match code {
                 KeyCode::Up => self.popup_scroll = self.popup_scroll.saturating_sub(1),
-                KeyCode::Down => self.popup_scroll += 1,
+                KeyCode::Down => self.popup_scroll = (self.popup_scroll + 1).min(self.popup_max.get()),
                 KeyCode::PageUp => self.popup_scroll = self.popup_scroll.saturating_sub(10),
-                KeyCode::PageDown => self.popup_scroll += 10,
+                KeyCode::PageDown => self.popup_scroll = (self.popup_scroll + 10).min(self.popup_max.get()),
+                KeyCode::Home => self.popup_scroll = 0,
+                KeyCode::End => self.popup_scroll = self.popup_max.get(),
+                KeyCode::Tab | KeyCode::Left | KeyCode::Right if self.mode == Mode::Sources => {
+                    (self.focus, self.popup_scroll) = (1 - self.focus, 0);
+                }
                 KeyCode::Char('q') => return false,
                 _ => self.mode = Mode::Normal,
             },
             Mode::Normal => match code {
                 KeyCode::Char('q') => return false,
                 KeyCode::Char(' ') => {
-                    self.paused = !self.paused;
-                    send(Cmd::Pause(self.paused));
+                    self.manual = !self.manual;
+                    self.waiting = false;
+                    send(Cmd::Manual(self.manual));
                 }
-                KeyCode::Char('p') => self.mode = Mode::Ask(Side::Pro),
-                KeyCode::Char('c') => self.mode = Mode::Ask(Side::Con),
-                KeyCode::Char('j') => self.mode = Mode::Ask(Side::Judge),
+                KeyCode::Enter if self.waiting => {
+                    self.waiting = false;
+                    send(Cmd::Next);
+                }
+                KeyCode::Char('p') => self.mode = Mode::Ask,
                 KeyCode::Char('f') => (self.mode, self.popup_scroll) = (Mode::Sources, 0),
                 KeyCode::Char('v') if self.verdict.is_some() => (self.mode, self.popup_scroll) = (Mode::Verdict, 0),
                 KeyCode::Tab | KeyCode::Left | KeyCode::Right => self.focus = 1 - self.focus,
@@ -286,6 +301,7 @@ async fn plain(topic: String) {
             Msg::Verdict(v) => println!("\n[VEREDITO] {v:#?}"),
             Msg::Error(e) => println!("\n[ERRO] {e}"),
             Msg::Saved(p) => println!("salvando em {}", p.display()),
+            Msg::Waiting => {}
         }
         let _ = out.flush();
     }
