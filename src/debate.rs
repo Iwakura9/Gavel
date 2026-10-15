@@ -405,7 +405,7 @@ only one short sentence handing over the floor."
                     resposta: String,
                 }
                 let a: Answer = self.ask_json(Side::Judge, &instr, ASK_SCHEMA).await?;
-                self.send(Msg::Judge(format!("❓ «{q}»\n{}", a.resposta)));
+                self.send(Msg::Judge(format!("? «{q}»\n{}", a.resposta)));
                 self.log(Side::Judge.name(), &trf!("pergunta da plateia: {q}", "audience question: {q}"), &a.resposta);
                 let side = match a.destino.as_str() {
                     "pro" => Side::Pro,

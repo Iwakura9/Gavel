@@ -271,6 +271,7 @@ impl App {
                         self.sel = self.saved_list.len().checked_sub(1).map(|last| i.min(last));
                     }
                 }
+                KeyCode::Char('q') if self.sel.is_some() => return false,
                 KeyCode::Enter if self.sel.is_some() => {
                     let (path, rec) = std::mem::take(&mut self.saved_list).swap_remove(self.sel.unwrap());
                     self.topic = rec.tema.clone();
@@ -308,11 +309,11 @@ impl App {
                 KeyCode::Tab | KeyCode::Left | KeyCode::Right if self.mode == Mode::Sources => {
                     (self.focus, self.popup_scroll) = (1 - self.focus, 0);
                 }
-                KeyCode::Char('q') => return false,
+                KeyCode::Char('q') => self.mode = Mode::Topic,
                 _ => self.mode = Mode::Normal,
             },
             Mode::Normal => match code {
-                KeyCode::Char('q') => return false,
+                KeyCode::Char('q') => self.mode = Mode::Topic,
                 KeyCode::Char(' ') if !self.readonly => {
                     self.manual = !self.manual;
                     self.waiting = false;
@@ -400,8 +401,10 @@ async fn main() -> std::io::Result<()> {
             }
         }
     });
-    let (msg_tx, mut msg_rx) = unbounded_channel();
+    let (mut msg_tx, mut msg_rx) = unbounded_channel();
     let mut cmd_tx: Option<UnboundedSender<Cmd>> = None;
+    let mut task: Option<tokio::task::JoinHandle<()>> = None;
+    let lang = en();
     let mut started = false;
     let mut tick = tokio::time::interval(Duration::from_millis(150));
 
@@ -411,14 +414,12 @@ async fn main() -> std::io::Result<()> {
             started = true;
             let (tx, rx) = unbounded_channel();
             match app.open.take() {
-                None => {
-                    tokio::spawn(debate::run(app.topic.clone(), msg_tx.clone(), rx));
-                }
+                None => task = Some(tokio::spawn(debate::run(app.topic.clone(), msg_tx.clone(), rx))),
                 Some((path, rec)) => {
                     // o debate segue no idioma em que começou
                     EN.store(rec.idioma == "en", std::sync::atomic::Ordering::Relaxed);
                     if rec.resumable() {
-                        tokio::spawn(debate::resume(path, rec, msg_tx.clone(), rx));
+                        task = Some(tokio::spawn(debate::resume(path, rec, msg_tx.clone(), rx)));
                     } else {
                         for m in debate::replay(&path, &rec) {
                             app.on_msg(m);
@@ -442,6 +443,18 @@ async fn main() -> std::io::Result<()> {
             }
             Some(m) = msg_rx.recv() => app.on_msg(m),
             _ = tick.tick() => app.tick += 1,
+        }
+        if started && app.mode == Mode::Topic {
+            // q: volta à tela inicial; o debate para onde está e pode ser retomado da lista
+            if let Some(t) = task.take() {
+                t.abort();
+            }
+            EN.store(lang, std::sync::atomic::Ordering::Relaxed);
+            let saved = app.saved.take();
+            app = App::new(String::new());
+            app.saved = saved;
+            (msg_tx, msg_rx) = unbounded_channel();
+            (cmd_tx, started) = (None, false);
         }
     }
     ratatui::restore();
