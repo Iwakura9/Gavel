@@ -75,6 +75,8 @@ pub struct App {
     /// Tela inicial: debates salvos e o selecionado (None = campo de tema).
     pub saved_list: Vec<(PathBuf, Record)>,
     pub sel: Option<usize>,
+    /// Primeiro Del apertado: o segundo apaga o debate selecionado.
+    pub confirm_del: bool,
     open: Option<(PathBuf, Record)>,
     pub readonly: bool,
 }
@@ -85,6 +87,7 @@ impl App {
             mode: if topic.is_empty() { Mode::Topic } else { Mode::Normal },
             saved_list: if topic.is_empty() { debate::list() } else { vec![] },
             sel: None,
+            confirm_del: false,
             open: None,
             readonly: false,
             input: String::new(),
@@ -245,6 +248,7 @@ impl App {
         if ctrl && code == KeyCode::Char('c') {
             return false;
         }
+        let confirm_del = std::mem::take(&mut self.confirm_del);
         let send = |c: Cmd| {
             if let Some(tx) = cmd {
                 let _ = tx.send(c);
@@ -257,6 +261,16 @@ impl App {
                 }
                 KeyCode::Up => self.sel = self.sel.and_then(|i| i.checked_sub(1)),
                 KeyCode::Esc if self.sel.is_some() => self.sel = None,
+                KeyCode::Delete if self.sel.is_some() && !confirm_del => self.confirm_del = true,
+                KeyCode::Delete if self.sel.is_some() => {
+                    let i = self.sel.unwrap();
+                    let path = &self.saved_list[i].0;
+                    if std::fs::remove_file(path.with_extension("json")).is_ok() {
+                        let _ = std::fs::remove_file(path.with_extension("md"));
+                        self.saved_list.remove(i);
+                        self.sel = self.saved_list.len().checked_sub(1).map(|last| i.min(last));
+                    }
+                }
                 KeyCode::Enter if self.sel.is_some() => {
                     let (path, rec) = std::mem::take(&mut self.saved_list).swap_remove(self.sel.unwrap());
                     self.topic = rec.tema.clone();

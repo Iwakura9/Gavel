@@ -355,7 +355,8 @@ fn verdict_popup(f: &mut Frame, app: &App) {
 
 fn topic_screen(f: &mut Frame, app: &App) {
     let a = f.area();
-    let shown = app.saved_list.len().min(8) as u16;
+    // a lista só aparece ao descer com ↓ a partir do campo de tema
+    let shown = if app.sel.is_some() { app.saved_list.len().min(8) as u16 } else { 0 };
     let list_h = if shown > 0 { shown + 2 } else { 0 };
     let area = center(a, 66, 15 + list_h);
     let inner = popup(f, area, Line::from(" ⚖ GAVEL ".bold().fg(Color::Black).bg(GOLD)).centered(), GOLD);
@@ -367,8 +368,16 @@ fn topic_screen(f: &mut Frame, app: &App) {
     }
     f.render_widget(Line::from(tr!("Qual o tema do debate?", "What is the debate topic?").bold()).centered(), label);
     f.render_widget(Line::from(vec!["› ".fg(GOLD), app.input.clone().into(), "▏".fg(GOLD)]), input);
-    let hint_text = if shown > 0 { tr!("Enter começa/abre · ↑↓ debates salvos · Esc sai", "Enter starts/opens · ↑↓ saved debates · Esc quits") } else { tr!("Enter começa · Esc sai", "Enter starts · Esc quits") };
-    f.render_widget(Line::from(hint_text.fg(DIM)).centered(), hint);
+    let hint_line = if app.confirm_del {
+        tr!("Del de novo apaga · outra tecla cancela", "Del again deletes · any other key cancels").bold().fg(RED)
+    } else if shown > 0 {
+        tr!("Enter abre · Del apaga · Esc volta", "Enter opens · Del deletes · Esc goes back").fg(DIM)
+    } else if !app.saved_list.is_empty() {
+        tr!("Enter começa · ↓ debates salvos · Esc sai", "Enter starts · ↓ saved debates · Esc quits").fg(DIM)
+    } else {
+        tr!("Enter começa · Esc sai", "Enter starts · Esc quits").fg(DIM)
+    };
+    f.render_widget(Line::from(hint_line).centered(), hint);
     if shown == 0 {
         return;
     }
@@ -379,7 +388,7 @@ fn topic_screen(f: &mut Frame, app: &App) {
     for (k, (_, rec)) in app.saved_list.iter().enumerate().skip(start).take(shown as usize) {
         let (mark, c) = if rec.veredito.is_some() { ("✓", GREEN) } else if rec.resumable() { ("↻", GOLD) } else { ("·", DIM) };
         lines.push(if app.sel == Some(k) {
-            Line::from(format!(" {mark} {} ", rec.tema).bold().fg(Color::Black).bg(GOLD))
+            Line::from(format!(" {mark} {} ", rec.tema).bold().fg(Color::Black).bg(if app.confirm_del { RED } else { GOLD }))
         } else {
             Line::from(vec![format!(" {mark} ").fg(c), rec.tema.clone().into()])
         });
